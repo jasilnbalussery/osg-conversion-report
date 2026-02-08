@@ -1,458 +1,442 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+from io import BytesIO
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
-# Set page config
-st.set_page_config(page_title="OSG Target Achievement Analysis", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="OSG Target Achievement Report", layout="wide")
 
-# Title
-st.title("📊 OSG Target Achievement Analysis - RBM & Store Wise")
+st.title("📊 OSG Target Achievement Report Generator")
 
-# Define target percentages
-TARGET_PERCENTAGES = {
+# Target percentages
+TARGET_MAP = {
     'TV': 5,
+    'MICROWAVE OVEN': 5,
+    'REFRIGERATOR': 2,
     'AC': 1,
-    'REF': 2,
-    'WM': 3,
-    'OVEN': 5,
-    'SA': 2,
-    'OTHER': 0  # No specific target mentioned for others
+    'WASHING MACHINE': 3,
+    'SMALL APPLIANCE': 2
 }
 
 def normalize_category(category):
     """Normalize category names to match target categories"""
     if pd.isna(category):
-        return 'OTHER'
+        return None
     
-    category_upper = str(category).upper().strip()
+    cat_upper = str(category).upper().strip()
     
-    # Map to standard categories
-    if 'TV' in category_upper or 'TELEVISION' in category_upper:
+    # Exact matches first
+    for target_cat in TARGET_MAP.keys():
+        if cat_upper == target_cat:
+            return target_cat
+    
+    # Partial matches
+    if 'TV' in cat_upper or 'TELEVISION' in cat_upper:
         return 'TV'
-    elif 'AC' in category_upper or 'AIR CONDITIONER' in category_upper or 'AIRCONDITIONER' in category_upper:
+    elif 'MICROWAVE' in cat_upper or 'OVEN' in cat_upper:
+        return 'MICROWAVE OVEN'
+    elif 'REFRIGERATOR' in cat_upper or 'FRIDGE' in cat_upper or 'REF' in cat_upper:
+        return 'REFRIGERATOR'
+    elif 'AC' in cat_upper or 'AIR CONDITIONER' in cat_upper or 'AIRCONDITIONER' in cat_upper:
         return 'AC'
-    elif 'REF' in category_upper or 'REFRIGERATOR' in category_upper or 'FRIDGE' in category_upper:
-        return 'REF'
-    elif 'WM' in category_upper or 'WASHING' in category_upper or 'WASHER' in category_upper:
-        return 'WM'
-    elif 'OVEN' in category_upper or 'MICROWAVE' in category_upper:
-        return 'OVEN'
-    elif 'SA' in category_upper or 'SMALL APPLIANCE' in category_upper:
-        return 'SA'
-    else:
-        return 'OTHER'
+    elif 'WASHING' in cat_upper or 'WASHER' in cat_upper or 'WM' in cat_upper:
+        return 'WASHING MACHINE'
+    elif 'SMALL APPLIANCE' in cat_upper or 'SA' in cat_upper:
+        return 'SMALL APPLIANCE'
+    
+    return None  # Categories not in target list
 
-@st.cache_data
-def load_data(osg_file, product_file):
-    """Load and process the uploaded files"""
-    try:
-        # Load OSG data
-        osg_df = pd.read_excel(osg_file)
-        
-        # Load Product data
-        product_df = pd.read_excel(product_file)
-        
-        return osg_df, product_df
-    except Exception as e:
-        st.error(f"Error loading files: {str(e)}")
-        return None, None
-
-def process_data(osg_df, product_df):
-    """Process and merge data for analysis"""
+def process_data(product_df, osg_df):
+    """Process and merge data for report generation"""
     
-    # Normalize category in OSG data
-    osg_df['Normalized_Category'] = osg_df['Category'].apply(normalize_category)
+    # Identify columns - flexible column name matching
+    product_cols = {
+        'rbm': None,
+        'branch': None,
+        'category': None,
+        'sold_price': None
+    }
     
-    # Normalize category in Product data
-    product_df['Normalized_Category'] = product_df['Item Category'].apply(normalize_category)
+    osg_cols = {
+        'branch': None,
+        'category': None,
+        'sold_price': None
+    }
     
-    # Convert date columns
-    if 'Date' in osg_df.columns:
-        osg_df['Date'] = pd.to_datetime(osg_df['Date'], errors='coerce')
+    # Find product file columns
+    for col in product_df.columns:
+        col_upper = col.upper()
+        if 'RBM' in col_upper:
+            product_cols['rbm'] = col
+        elif 'BRANCH' in col_upper:
+            product_cols['branch'] = col
+        elif 'CATEGORY' in col_upper or 'ITEM CATEGORY' in col_upper:
+            product_cols['category'] = col
+        elif 'TAXABLE VALUE' in col_upper:
+            product_cols['sold_price'] = col
+        elif 'SOLD PRICE' in col_upper or 'ITEM RATE' in col_upper:
+            if product_cols['sold_price'] is None:
+                product_cols['sold_price'] = col
     
-    if 'Date' in product_df.columns:
-        product_df['Date'] = pd.to_datetime(product_df['Date'], errors='coerce')
+    # Find OSG file columns
+    for col in osg_df.columns:
+        col_upper = col.upper()
+        if 'STORE NAME' in col_upper or 'BRANCH' in col_upper:
+            osg_cols['branch'] = col
+        elif 'CATEGORY' in col_upper:
+            osg_cols['category'] = col
+        elif 'SOLD PRICE' in col_upper:
+            osg_cols['sold_price'] = col
     
-    # Calculate OSG sales by Store, RBM, and Category
-    osg_summary = osg_df.groupby(['Store Name', 'Normalized_Category']).agg({
-        'Invoice No': 'count',
-        'Sold Price': 'sum',
-        'Quantity': 'sum'
+    # Verify all required columns are found
+    missing_product = [k for k, v in product_cols.items() if v is None]
+    missing_osg = [k for k, v in osg_cols.items() if v is None]
+    
+    if missing_product or missing_osg:
+        st.error(f"Missing columns - Product: {missing_product}, OSG: {missing_osg}")
+        return None
+    
+    # Extract relevant columns
+    product_clean = product_df[[
+        product_cols['rbm'],
+        product_cols['branch'],
+        product_cols['category'],
+        product_cols['sold_price']
+    ]].copy()
+    
+    product_clean.columns = ['RBM', 'Branch', 'Category', 'Product_Sold_Price']
+    
+    osg_clean = osg_df[[
+        osg_cols['branch'],
+        osg_cols['category'],
+        osg_cols['sold_price']
+    ]].copy()
+    
+    osg_clean.columns = ['Branch', 'Category', 'OSG_Sold_Price']
+    
+    # Normalize categories
+    product_clean['Category_Normalized'] = product_clean['Category'].apply(normalize_category)
+    osg_clean['Category_Normalized'] = osg_clean['Category'].apply(normalize_category)
+    
+    # Remove rows with categories not in target list
+    product_clean = product_clean[product_clean['Category_Normalized'].notna()].copy()
+    osg_clean = osg_clean[osg_clean['Category_Normalized'].notna()].copy()
+    
+    # Aggregate Product data
+    product_agg = product_clean.groupby(['RBM', 'Branch', 'Category_Normalized']).agg({
+        'Product_Sold_Price': 'sum'
     }).reset_index()
-    osg_summary.columns = ['Store Name', 'Category', 'OSG_Invoice_Count', 'OSG_Sales_Value', 'OSG_Quantity']
+    product_agg.columns = ['RBM', 'Branch', 'Category', 'Product_Sold_Price']
     
-    # Calculate Product sales by Store (Branch), RBM, and Category
-    product_summary = product_df.groupby(['Branch', 'RBM', 'Normalized_Category']).agg({
-        'Invoice Number': 'count',
-        'Taxable Value': 'sum',
-        'QTY': 'sum'
+    # Aggregate OSG data
+    osg_agg = osg_clean.groupby(['Branch', 'Category_Normalized']).agg({
+        'OSG_Sold_Price': 'sum'
     }).reset_index()
-    product_summary.columns = ['Store Name', 'RBM', 'Category', 'Product_Invoice_Count', 'Product_Sales_Value', 'Product_Quantity']
+    osg_agg.columns = ['Branch', 'Category', 'OSG_Sold_Price']
     
-    # Merge OSG and Product data
-    merged_df = product_summary.merge(
-        osg_summary, 
-        on=['Store Name', 'Category'], 
-        how='left'
-    )
+    # Merge data
+    merged = product_agg.merge(osg_agg, on=['Branch', 'Category'], how='left')
+    merged['OSG_Sold_Price'] = merged['OSG_Sold_Price'].fillna(0)
     
-    # Fill NaN values with 0
-    merged_df['OSG_Invoice_Count'] = merged_df['OSG_Invoice_Count'].fillna(0)
-    merged_df['OSG_Sales_Value'] = merged_df['OSG_Sales_Value'].fillna(0)
-    merged_df['OSG_Quantity'] = merged_df['OSG_Quantity'].fillna(0)
+    # Add Target %
+    merged['Target_%'] = merged['Category'].map(TARGET_MAP)
     
-    # Calculate target values
-    merged_df['Target_Percentage'] = merged_df['Category'].map(TARGET_PERCENTAGES)
-    merged_df['Target_Value'] = (merged_df['Product_Sales_Value'] * merged_df['Target_Percentage'] / 100).round(2)
-    
-    # Calculate achievement
-    merged_df['Achievement_Value'] = merged_df['OSG_Sales_Value']
-    merged_df['Achievement_Percentage'] = np.where(
-        merged_df['Target_Value'] > 0,
-        (merged_df['Achievement_Value'] / merged_df['Target_Value'] * 100).round(2),
+    # Calculate Value Conversion (%)
+    merged['Value_Conversion_%'] = np.where(
+        merged['Product_Sold_Price'] > 0,
+        (merged['OSG_Sold_Price'] / merged['Product_Sold_Price'] * 100).round(2),
         0
     )
     
-    # Calculate gap
-    merged_df['Gap_Value'] = (merged_df['Target_Value'] - merged_df['Achievement_Value']).round(2)
-    merged_df['Gap_Percentage'] = (100 - merged_df['Achievement_Percentage']).round(2)
+    # Calculate Need to Achieve Target (Value)
+    merged['Need_to_Achieve_Target'] = np.maximum(
+        (merged['Product_Sold_Price'] * merged['Target_%'] / 100 - merged['OSG_Sold_Price']).round(2),
+        0
+    )
     
-    return merged_df, osg_df, product_df
+    # Reorder columns
+    final_df = merged[[
+        'RBM',
+        'Branch',
+        'Category',
+        'Product_Sold_Price',
+        'OSG_Sold_Price',
+        'Value_Conversion_%',
+        'Need_to_Achieve_Target',
+        'Target_%'
+    ]].copy()
+    
+    return final_df
 
-def create_summary_metrics(df):
-    """Create summary metrics"""
+def create_excel_report(df):
+    """Create Excel report with RBM-wise sheets"""
     
-    total_target = df['Target_Value'].sum()
-    total_achievement = df['Achievement_Value'].sum()
-    overall_achievement_pct = (total_achievement / total_target * 100) if total_target > 0 else 0
-    total_gap = total_target - total_achievement
+    wb = Workbook()
+    wb.remove(wb.active)
     
-    col1, col2, col3, col4 = st.columns(4)
+    # Header style
+    header_style = {
+        'font': Font(bold=True, color='FFFFFF', size=11),
+        'fill': PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid'),
+        'alignment': Alignment(horizontal='center', vertical='center', wrap_text=True),
+        'border': Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+    }
     
-    with col1:
-        st.metric("Total Target Value", f"₹{total_target:,.2f}")
+    data_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
     
-    with col2:
-        st.metric("Total Achievement", f"₹{total_achievement:,.2f}")
+    # Get unique RBMs
+    rbms = sorted(df['RBM'].unique())
     
-    with col3:
-        st.metric("Achievement %", f"{overall_achievement_pct:.2f}%")
+    for rbm in rbms:
+        # Filter data for this RBM
+        rbm_data = df[df['RBM'] == rbm].copy()
+        rbm_data = rbm_data.drop('RBM', axis=1)  # Remove RBM column from sheet
+        rbm_data = rbm_data.sort_values(['Branch', 'Category'])
+        
+        # Create sheet with RBM name (sanitize sheet name)
+        sheet_name = str(rbm)[:31]  # Excel sheet name max 31 chars
+        ws = wb.create_sheet(sheet_name)
+        
+        # Add title
+        ws['A1'] = f'Target Achievement Report - {rbm}'
+        ws['A1'].font = Font(bold=True, size=14, color='1F4E78')
+        ws.merge_cells('A1:H1')
+        ws['A1'].alignment = Alignment(horizontal='center')
+        
+        # Headers
+        headers = [
+            'Branch',
+            'Category',
+            'Product Sold Price',
+            'OSG Sold Price',
+            'Value Conversion (%)',
+            'Need to Achieve Target (Value)',
+            'Target %'
+        ]
+        
+        for col_idx, header in enumerate(headers, start=1):
+            cell = ws.cell(row=3, column=col_idx, value=header)
+            cell.font = header_style['font']
+            cell.fill = header_style['fill']
+            cell.alignment = header_style['alignment']
+            cell.border = header_style['border']
+        
+        # Data rows
+        for row_idx, row_data in enumerate(rbm_data.values, start=4):
+            for col_idx, value in enumerate(row_data, start=1):
+                cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                cell.border = data_border
+                cell.alignment = Alignment(horizontal='left' if col_idx <= 2 else 'right', vertical='center')
+                
+                # Number formatting
+                if col_idx in [3, 4, 6]:  # Product Price, OSG Price, Need to Achieve
+                    cell.number_format = '₹#,##0.00'
+                elif col_idx in [5, 7]:  # Value Conversion %, Target %
+                    cell.number_format = '0.00"%"'
+        
+        # Column widths
+        ws.column_dimensions['A'].width = 25  # Branch
+        ws.column_dimensions['B'].width = 20  # Category
+        ws.column_dimensions['C'].width = 20  # Product Sold Price
+        ws.column_dimensions['D'].width = 18  # OSG Sold Price
+        ws.column_dimensions['E'].width = 22  # Value Conversion %
+        ws.column_dimensions['F'].width = 28  # Need to Achieve Target
+        ws.column_dimensions['G'].width = 12  # Target %
+        
+        # Add summary at bottom
+        last_row = len(rbm_data) + 4
+        ws.cell(row=last_row + 1, column=1, value='TOTAL').font = Font(bold=True)
+        
+        # Total formulas
+        ws.cell(row=last_row + 1, column=3, value=f'=SUM(C4:C{last_row})')
+        ws.cell(row=last_row + 1, column=3).number_format = '₹#,##0.00'
+        ws.cell(row=last_row + 1, column=3).font = Font(bold=True)
+        
+        ws.cell(row=last_row + 1, column=4, value=f'=SUM(D4:D{last_row})')
+        ws.cell(row=last_row + 1, column=4).number_format = '₹#,##0.00'
+        ws.cell(row=last_row + 1, column=4).font = Font(bold=True)
+        
+        ws.cell(row=last_row + 1, column=5, value=f'=IF(C{last_row + 1}>0,(D{last_row + 1}/C{last_row + 1})*100,0)')
+        ws.cell(row=last_row + 1, column=5).number_format = '0.00"%"'
+        ws.cell(row=last_row + 1, column=5).font = Font(bold=True)
+        
+        ws.cell(row=last_row + 1, column=6, value=f'=SUM(F4:F{last_row})')
+        ws.cell(row=last_row + 1, column=6).number_format = '₹#,##0.00'
+        ws.cell(row=last_row + 1, column=6).font = Font(bold=True)
     
-    with col4:
-        st.metric("Gap to Target", f"₹{total_gap:,.2f}", delta=f"-{(total_gap/total_target*100):.1f}%" if total_target > 0 else "0%")
+    # Create Summary sheet
+    ws_summary = wb.create_sheet('Summary', 0)
+    ws_summary['A1'] = 'OSG TARGET ACHIEVEMENT SUMMARY'
+    ws_summary['A1'].font = Font(bold=True, size=16, color='1F4E78')
+    ws_summary.merge_cells('A1:G1')
+    ws_summary['A1'].alignment = Alignment(horizontal='center')
+    
+    # RBM-wise summary
+    summary_data = df.groupby('RBM').agg({
+        'Product_Sold_Price': 'sum',
+        'OSG_Sold_Price': 'sum',
+        'Need_to_Achieve_Target': 'sum'
+    }).reset_index()
+    
+    summary_data['Value_Conversion_%'] = (
+        summary_data['OSG_Sold_Price'] / summary_data['Product_Sold_Price'] * 100
+    ).round(2)
+    
+    # Summary headers
+    summary_headers = ['RBM', 'Product Sold Price', 'OSG Sold Price', 'Value Conversion (%)', 'Need to Achieve Target']
+    for col_idx, header in enumerate(summary_headers, start=1):
+        cell = ws_summary.cell(row=3, column=col_idx, value=header)
+        cell.font = header_style['font']
+        cell.fill = header_style['fill']
+        cell.alignment = header_style['alignment']
+        cell.border = header_style['border']
+    
+    # Summary data
+    for row_idx, row_data in enumerate(summary_data.values, start=4):
+        for col_idx, value in enumerate(row_data, start=1):
+            cell = ws_summary.cell(row=row_idx, column=col_idx, value=value)
+            cell.border = data_border
+            cell.alignment = Alignment(horizontal='left' if col_idx == 1 else 'right', vertical='center')
+            
+            if col_idx in [2, 3, 5]:
+                cell.number_format = '₹#,##0.00'
+            elif col_idx == 4:
+                cell.number_format = '0.00"%"'
+    
+    for col in range(1, 6):
+        ws_summary.column_dimensions[get_column_letter(col)].width = 25
+    
+    return wb
 
 def main():
     
-    # File uploaders
     st.sidebar.header("📁 Upload Files")
     
-    osg_file = st.sidebar.file_uploader("Upload OSG Data (Excel)", type=['xlsx', 'xls'], key='osg')
-    product_file = st.sidebar.file_uploader("Upload Product Data (Excel)", type=['xlsx', 'xls'], key='product')
+    product_file = st.sidebar.file_uploader("Upload Product File (Excel)", type=['xlsx', 'xls'], key='product')
+    osg_file = st.sidebar.file_uploader("Upload OSG File (Excel)", type=['xlsx', 'xls'], key='osg')
     
-    if osg_file and product_file:
+    if product_file and osg_file:
         
-        # Load data
-        with st.spinner("Loading data..."):
-            osg_df, product_df = load_data(osg_file, product_file)
+        with st.spinner("Loading files..."):
+            product_df = pd.read_excel(product_file)
+            osg_df = pd.read_excel(osg_file)
         
-        if osg_df is not None and product_df is not None:
+        st.success(f"✅ Files loaded! Product: {len(product_df)} rows, OSG: {len(osg_df)} rows")
+        
+        # Show column detection
+        with st.expander("📋 Detected Columns"):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Product File Columns:**")
+                st.write(product_df.columns.tolist())
+            with col2:
+                st.write("**OSG File Columns:**")
+                st.write(osg_df.columns.tolist())
+        
+        if st.button("🚀 Generate Report", type="primary"):
             
-            # Process data
             with st.spinner("Processing data..."):
-                merged_df, osg_raw, product_raw = process_data(osg_df, product_df)
+                processed_df = process_data(product_df, osg_df)
             
-            st.success(f"✅ Data loaded successfully! OSG Records: {len(osg_raw)}, Product Records: {len(product_raw)}")
-            
-            # Filters
-            st.sidebar.header("🔍 Filters")
-            
-            # RBM Filter
-            rbm_list = ['All'] + sorted(merged_df['RBM'].dropna().unique().tolist())
-            selected_rbm = st.sidebar.selectbox("Select RBM", rbm_list)
-            
-            # Store Filter
-            if selected_rbm != 'All':
-                store_list = ['All'] + sorted(merged_df[merged_df['RBM'] == selected_rbm]['Store Name'].dropna().unique().tolist())
-            else:
-                store_list = ['All'] + sorted(merged_df['Store Name'].dropna().unique().tolist())
-            selected_store = st.sidebar.selectbox("Select Store", store_list)
-            
-            # Category Filter
-            category_list = ['All'] + sorted(merged_df['Category'].unique().tolist())
-            selected_category = st.sidebar.selectbox("Select Category", category_list)
-            
-            # Apply filters
-            filtered_df = merged_df.copy()
-            
-            if selected_rbm != 'All':
-                filtered_df = filtered_df[filtered_df['RBM'] == selected_rbm]
-            
-            if selected_store != 'All':
-                filtered_df = filtered_df[filtered_df['Store Name'] == selected_store]
-            
-            if selected_category != 'All':
-                filtered_df = filtered_df[filtered_df['Category'] == selected_category]
-            
-            # Display summary metrics
-            st.header("📈 Overall Performance")
-            create_summary_metrics(filtered_df)
-            
-            # Tabs for different views
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(["🎯 RBM-wise Report", "🏪 Store-wise Report", "📊 Category-wise Report", "📉 Detailed Data", "📋 Raw Data"])
-            
-            with tab1:
-                st.subheader("RBM-wise Target Achievement")
+            if processed_df is not None:
                 
-                rbm_summary = filtered_df.groupby('RBM').agg({
-                    'Product_Sales_Value': 'sum',
-                    'Target_Value': 'sum',
-                    'Achievement_Value': 'sum',
-                    'Gap_Value': 'sum'
-                }).reset_index()
+                st.success(f"✅ Data processed successfully! {len(processed_df)} records")
                 
-                rbm_summary['Achievement_Percentage'] = np.where(
-                    rbm_summary['Target_Value'] > 0,
-                    (rbm_summary['Achievement_Value'] / rbm_summary['Target_Value'] * 100).round(2),
-                    0
-                )
+                # Preview
+                st.subheader("📊 Data Preview")
+                st.dataframe(processed_df.head(20), use_container_width=True)
                 
-                rbm_summary = rbm_summary.sort_values('Achievement_Percentage', ascending=False)
-                
-                # Display table
-                st.dataframe(
-                    rbm_summary.style.format({
-                        'Product_Sales_Value': '₹{:,.2f}',
-                        'Target_Value': '₹{:,.2f}',
-                        'Achievement_Value': '₹{:,.2f}',
-                        'Gap_Value': '₹{:,.2f}',
-                        'Achievement_Percentage': '{:.2f}%'
-                    }).background_gradient(subset=['Achievement_Percentage'], cmap='RdYlGn', vmin=0, vmax=100),
-                    use_container_width=True
-                )
-                
-                # RBM Chart
-                fig = go.Figure()
-                fig.add_trace(go.Bar(
-                    name='Target Value',
-                    x=rbm_summary['RBM'],
-                    y=rbm_summary['Target_Value'],
-                    marker_color='lightblue'
-                ))
-                fig.add_trace(go.Bar(
-                    name='Achievement Value',
-                    x=rbm_summary['RBM'],
-                    y=rbm_summary['Achievement_Value'],
-                    marker_color='green'
-                ))
-                fig.update_layout(
-                    title='RBM-wise Target vs Achievement',
-                    xaxis_title='RBM',
-                    yaxis_title='Value (₹)',
-                    barmode='group',
-                    height=500
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with tab2:
-                st.subheader("Store-wise Target Achievement")
-                
-                store_summary = filtered_df.groupby(['RBM', 'Store Name']).agg({
-                    'Product_Sales_Value': 'sum',
-                    'Target_Value': 'sum',
-                    'Achievement_Value': 'sum',
-                    'Gap_Value': 'sum'
-                }).reset_index()
-                
-                store_summary['Achievement_Percentage'] = np.where(
-                    store_summary['Target_Value'] > 0,
-                    (store_summary['Achievement_Value'] / store_summary['Target_Value'] * 100).round(2),
-                    0
-                )
-                
-                store_summary = store_summary.sort_values('Achievement_Percentage', ascending=False)
-                
-                # Display table
-                st.dataframe(
-                    store_summary.style.format({
-                        'Product_Sales_Value': '₹{:,.2f}',
-                        'Target_Value': '₹{:,.2f}',
-                        'Achievement_Value': '₹{:,.2f}',
-                        'Gap_Value': '₹{:,.2f}',
-                        'Achievement_Percentage': '{:.2f}%'
-                    }).background_gradient(subset=['Achievement_Percentage'], cmap='RdYlGn', vmin=0, vmax=100),
-                    use_container_width=True
-                )
-                
-                # Top 10 and Bottom 10 stores
-                col1, col2 = st.columns(2)
+                # Statistics
+                col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
-                    st.markdown("#### 🏆 Top 10 Stores")
-                    top_10 = store_summary.head(10)
-                    fig_top = px.bar(
-                        top_10,
-                        x='Store Name',
-                        y='Achievement_Percentage',
-                        color='Achievement_Percentage',
-                        color_continuous_scale='Greens',
-                        title='Top 10 Performing Stores'
-                    )
-                    fig_top.update_layout(height=400)
-                    st.plotly_chart(fig_top, use_container_width=True)
+                    st.metric("Total Product Sales", f"₹{processed_df['Product_Sold_Price'].sum():,.2f}")
                 
                 with col2:
-                    st.markdown("#### 📉 Bottom 10 Stores")
-                    bottom_10 = store_summary.tail(10)
-                    fig_bottom = px.bar(
-                        bottom_10,
-                        x='Store Name',
-                        y='Achievement_Percentage',
-                        color='Achievement_Percentage',
-                        color_continuous_scale='Reds',
-                        title='Bottom 10 Performing Stores'
-                    )
-                    fig_bottom.update_layout(height=400)
-                    st.plotly_chart(fig_bottom, use_container_width=True)
-            
-            with tab3:
-                st.subheader("Category-wise Target Achievement")
+                    st.metric("Total OSG Sales", f"₹{processed_df['OSG_Sold_Price'].sum():,.2f}")
                 
-                category_summary = filtered_df.groupby('Category').agg({
-                    'Product_Sales_Value': 'sum',
-                    'Target_Percentage': 'first',
-                    'Target_Value': 'sum',
-                    'Achievement_Value': 'sum',
-                    'Gap_Value': 'sum'
-                }).reset_index()
+                with col3:
+                    overall_conversion = (processed_df['OSG_Sold_Price'].sum() / 
+                                        processed_df['Product_Sold_Price'].sum() * 100)
+                    st.metric("Overall Conversion", f"{overall_conversion:.2f}%")
                 
-                category_summary['Achievement_Percentage'] = np.where(
-                    category_summary['Target_Value'] > 0,
-                    (category_summary['Achievement_Value'] / category_summary['Target_Value'] * 100).round(2),
-                    0
-                )
+                with col4:
+                    st.metric("Total Gap", f"₹{processed_df['Need_to_Achieve_Target'].sum():,.2f}")
                 
-                category_summary = category_summary.sort_values('Achievement_Percentage', ascending=False)
+                # Generate Excel
+                with st.spinner("Creating Excel report..."):
+                    wb = create_excel_report(processed_df)
+                    
+                    # Save to BytesIO
+                    buffer = BytesIO()
+                    wb.save(buffer)
+                    buffer.seek(0)
                 
-                # Display table
-                st.dataframe(
-                    category_summary.style.format({
-                        'Product_Sales_Value': '₹{:,.2f}',
-                        'Target_Percentage': '{:.0f}%',
-                        'Target_Value': '₹{:,.2f}',
-                        'Achievement_Value': '₹{:,.2f}',
-                        'Gap_Value': '₹{:,.2f}',
-                        'Achievement_Percentage': '{:.2f}%'
-                    }).background_gradient(subset=['Achievement_Percentage'], cmap='RdYlGn', vmin=0, vmax=100),
-                    use_container_width=True
-                )
+                st.success("✅ Report generated successfully!")
                 
-                # Category pie chart
-                fig_pie = px.pie(
-                    category_summary,
-                    values='Achievement_Value',
-                    names='Category',
-                    title='Category-wise OSG Sales Distribution'
-                )
-                st.plotly_chart(fig_pie, use_container_width=True)
-                
-                # Category bar chart
-                fig_cat = go.Figure()
-                fig_cat.add_trace(go.Bar(
-                    name='Target Value',
-                    x=category_summary['Category'],
-                    y=category_summary['Target_Value'],
-                    marker_color='lightblue'
-                ))
-                fig_cat.add_trace(go.Bar(
-                    name='Achievement Value',
-                    x=category_summary['Category'],
-                    y=category_summary['Achievement_Value'],
-                    marker_color='green'
-                ))
-                fig_cat.update_layout(
-                    title='Category-wise Target vs Achievement',
-                    xaxis_title='Category',
-                    yaxis_title='Value (₹)',
-                    barmode='group',
-                    height=500
-                )
-                st.plotly_chart(fig_cat, use_container_width=True)
-            
-            with tab4:
-                st.subheader("Detailed RBM → Store → Category Report")
-                
-                # Create detailed view
-                detailed_view = filtered_df.copy()
-                detailed_view = detailed_view.sort_values(['RBM', 'Store Name', 'Category'])
-                
-                # Display with formatting
-                st.dataframe(
-                    detailed_view[['RBM', 'Store Name', 'Category', 'Product_Sales_Value', 
-                                  'Target_Percentage', 'Target_Value', 'Achievement_Value', 
-                                  'Achievement_Percentage', 'Gap_Value', 'Gap_Percentage']].style.format({
-                        'Product_Sales_Value': '₹{:,.2f}',
-                        'Target_Percentage': '{:.0f}%',
-                        'Target_Value': '₹{:,.2f}',
-                        'Achievement_Value': '₹{:,.2f}',
-                        'Achievement_Percentage': '{:.2f}%',
-                        'Gap_Value': '₹{:,.2f}',
-                        'Gap_Percentage': '{:.2f}%'
-                    }).background_gradient(subset=['Achievement_Percentage'], cmap='RdYlGn', vmin=0, vmax=100),
-                    use_container_width=True,
-                    height=600
-                )
-                
-                # Download button
-                csv = detailed_view.to_csv(index=False)
                 st.download_button(
-                    label="📥 Download Detailed Report as CSV",
-                    data=csv,
-                    file_name=f"osg_target_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv"
+                    label="📥 Download Excel Report",
+                    data=buffer,
+                    file_name="OSG_Target_Achievement_Report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-            
-            with tab5:
-                st.subheader("Raw Data Explorer")
                 
-                data_choice = st.radio("Select Data to View", ["OSG Data", "Product Data"])
-                
-                if data_choice == "OSG Data":
-                    st.dataframe(osg_raw, use_container_width=True, height=600)
-                    st.info(f"Total Records: {len(osg_raw)}")
-                else:
-                    st.dataframe(product_raw, use_container_width=True, height=600)
-                    st.info(f"Total Records: {len(product_raw)}")
+                # Show RBM list
+                st.subheader("📑 Report Contains Following Sheets:")
+                rbms = sorted(processed_df['RBM'].unique())
+                st.write(f"**Summary Sheet** + **{len(rbms)} RBM Sheets:**")
+                st.write(", ".join(rbms))
     
     else:
-        st.info("👆 Please upload both OSG Data and Product Data files to begin analysis.")
+        st.info("👆 Please upload both Product and OSG files to generate the report")
         
-        # Show instructions
         st.markdown("""
         ### 📋 Instructions:
         
-        1. **Upload OSG Data File** - Should contain columns like:
-           - Store Name, Category, Invoice No, Sold Price, Quantity, etc.
+        **Product File** should contain:
+        - RBM
+        - Branch
+        - Category (or Item Category)
+        - Sold Price (or Taxable Value)
         
-        2. **Upload Product Data File** - Should contain columns like:
-           - Branch, RBM, BDM, Item Category, Invoice Number, Taxable Value, QTY, etc.
+        **OSG File** should contain:
+        - Branch (or Store Name)
+        - Category
+        - Sold Price
         
-        3. **Target Percentages Applied**:
-           - TV: 5%
-           - AC: 1%
-           - REF: 2%
-           - WM: 3%
-           - OVEN: 5%
-           - SA: 2%
-           - OTHER: 0%
+        ### 🎯 Target Percentages:
+        - TV: **5%**
+        - Microwave Oven: **5%**
+        - Refrigerator: **2%**
+        - AC: **1%**
+        - Washing Machine: **3%**
+        - Small Appliance: **2%**
         
-        4. The app will automatically:
-           - Match categories between OSG and Product data
-           - Calculate targets based on product sales
-           - Show achievement and gaps for each RBM, Store, and Category
+        ### 📊 Report Structure:
+        - **One sheet per RBM** with RBM name as sheet name
+        - **Summary sheet** with overall RBM-wise statistics
+        - Each sheet contains Branch-wise and Category-wise breakdown
+        
+        ### 📈 Columns in Report:
+        1. Branch
+        2. Category
+        3. Product Sold Price
+        4. OSG Sold Price
+        5. Value Conversion (%)
+        6. Need to Achieve Target (Value)
+        7. Target %
         """)
 
 if __name__ == "__main__":
