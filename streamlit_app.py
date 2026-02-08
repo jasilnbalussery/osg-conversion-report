@@ -88,13 +88,12 @@ def process_data(product_df, osg_df):
             product_cols['rbm'] = col
         elif 'BRANCH' in col_upper:
             product_cols['branch'] = col
-        elif 'CATEGORY' in col_upper or 'ITEM CATEGORY' in col_upper:
+        elif 'CATEGORY' in col_upper:
             product_cols['category'] = col
-        elif 'TAXABLE VALUE' in col_upper:
+        elif 'SOLD PRICE' in col_upper:  # Use Sold Price column
             product_cols['sold_price'] = col
-        elif 'SOLD PRICE' in col_upper or 'ITEM RATE' in col_upper:
-            if product_cols['sold_price'] is None:
-                product_cols['sold_price'] = col
+        elif 'TAXABLE VALUE' in col_upper and product_cols['sold_price'] is None:
+            product_cols['sold_price'] = col  # Fallback to Taxable Value if Sold Price not found
     
     # Find OSG file columns
     for col in osg_df.columns:
@@ -103,7 +102,7 @@ def process_data(product_df, osg_df):
             osg_cols['branch'] = col
         elif 'CATEGORY' in col_upper:
             osg_cols['category'] = col
-        elif 'SOLD PRICE' in col_upper:
+        elif 'SOLD PRICE' in col_upper:  # Use Sold Price column
             osg_cols['sold_price'] = col
     
     # Verify all required columns are found
