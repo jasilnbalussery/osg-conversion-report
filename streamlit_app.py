@@ -53,6 +53,21 @@ def normalize_category(category):
     return None
 
 
+def is_future_store(branch_name):
+    """Check if a branch/store is a Future Store"""
+    if pd.isna(branch_name):
+        return False
+    name_upper = str(branch_name).upper().strip()
+    # Match various Future store naming patterns
+    if 'FUTURE' in name_upper:
+        return True
+    if 'FRL' in name_upper:
+        return True
+    if 'FRETAIL' in name_upper or 'F RETAIL' in name_upper:
+        return True
+    return False
+
+
 def process_data(product_df, osg_df):
     product_cols = {'rbm': None, 'branch': None, 'category': None, 'sold_price': None}
     osg_cols = {'branch': None, 'category': None, 'sold_price': None}
@@ -119,8 +134,7 @@ def process_data(product_df, osg_df):
 
     merged['Value_Conversion_%'] = np.where(
         merged['Product_Sold_Price'] > 0,
-        (merged['OSG_Sold_Price'] / merged['Product_Sold_Price'] * 100).round(2),
-        0
+        (merged['OSG_Sold_Price'] / merged['Product_Sold_Price'] * 100).round(2), 0
     )
 
     merged['Need_to_Achieve_Target_%'] = np.maximum(
@@ -129,29 +143,38 @@ def process_data(product_df, osg_df):
 
     merged['Target_Achieved'] = merged['Value_Conversion_%'] >= merged['Target_%']
 
+    # ── Flag Future Stores ──
+    merged['Is_Future_Store'] = merged['Branch'].apply(is_future_store)
+
     final_df = merged[[
         'RBM', 'Branch', 'Category', 'Product_Sold_Price', 'OSG_Sold_Price',
-        'Value_Conversion_%', 'Target_%', 'Need_to_Achieve_Target_%', 'Target_Achieved'
+        'Value_Conversion_%', 'Target_%', 'Need_to_Achieve_Target_%',
+        'Target_Achieved', 'Is_Future_Store'
     ]].copy()
 
     return final_df
 
 
-def build_store_overview(df):
+def build_store_overview(df, future_only=False):
     """Build store-wise overall conversion summary"""
-    store_summary = df.groupby(['Branch', 'RBM']).agg({
+    work_df = df.copy()
+    if future_only:
+        work_df = work_df[work_df['Is_Future_Store']].copy()
+
+    if len(work_df) == 0:
+        return pd.DataFrame()
+
+    store_summary = work_df.groupby(['Branch', 'RBM']).agg({
         'Product_Sold_Price': 'sum',
         'OSG_Sold_Price': 'sum'
     }).reset_index()
 
     store_summary['Value_Conversion_%'] = np.where(
         store_summary['Product_Sold_Price'] > 0,
-        (store_summary['OSG_Sold_Price'] / store_summary['Product_Sold_Price'] * 100).round(2),
-        0
+        (store_summary['OSG_Sold_Price'] / store_summary['Product_Sold_Price'] * 100).round(2), 0
     )
 
-    # Weighted target per store
-    wtd = df.groupby('Branch').apply(
+    wtd = work_df.groupby('Branch').apply(
         lambda g: np.average(g['Target_%'], weights=g['Product_Sold_Price'])
         if g['Product_Sold_Price'].sum() > 0 else 0
     ).reset_index(name='Wtd_Target_%')
@@ -161,9 +184,8 @@ def build_store_overview(df):
         (store_summary['Wtd_Target_%'] - store_summary['Value_Conversion_%']).round(2), 0
     )
 
-    # Categories met count
-    cats_met = df[df['Target_Achieved']].groupby('Branch').size().reset_index(name='Categories_Target_Met')
-    cats_total = df.groupby('Branch').size().reset_index(name='Total_Categories')
+    cats_met = work_df[work_df['Target_Achieved']].groupby('Branch').size().reset_index(name='Categories_Target_Met')
+    cats_total = work_df.groupby('Branch').size().reset_index(name='Total_Categories')
 
     store_summary = store_summary.merge(cats_met, on='Branch', how='left')
     store_summary = store_summary.merge(cats_total, on='Branch', how='left')
@@ -175,11 +197,20 @@ def build_store_overview(df):
     return store_summary
 
 
-def build_top_bottom_analysis(df, store_overview):
-    """Build category-wise analysis for top 5 and bottom 5 stores"""
-    top5_stores = store_overview.head(5)['Branch'].tolist()
-    bottom5_stores = store_overview.tail(5)['Branch'].tolist()
+def build_top_bottom_analysis(df, future_store_overview):
+    """Build category-wise analysis for top 5 and bottom 5 FUTURE stores"""
 
+    if len(future_store_overview) == 0:
+        return [], [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), \
+            ["No Future Stores found in data. Check branch naming."]
+
+    n_top = min(5, len(future_store_overview))
+    n_bot = min(5, len(future_store_overview))
+
+    top5_stores = future_store_overview.head(n_top)['Branch'].tolist()
+    bottom5_stores = future_store_overview.tail(n_bot)['Branch'].tolist()
+
+    # Filter original data for these stores
     top5_data = df[df['Branch'].isin(top5_stores)].copy()
     bottom5_data = df[df['Branch'].isin(bottom5_stores)].copy()
 
@@ -229,89 +260,127 @@ def build_top_bottom_analysis(df, store_overview):
     comparison['Top5_vs_Target'] = (comparison['Top5_Conversion_%'] - comparison['Target_%']).round(2)
     comparison['Bottom5_vs_Target'] = (comparison['Bottom5_Conversion_%'] - comparison['Target_%']).round(2)
 
-    # Generate insights
-    insights = generate_insights(df, store_overview, top5_data, bottom5_data, comparison)
+    insights = generate_insights(df, future_store_overview,
+                                 top5_data, bottom5_data, comparison)
 
     return top5_stores, bottom5_stores, top5_cat, bot5_cat, comparison, insights
 
 
-def generate_insights(df, store_overview, top5_data, bottom5_data, comparison):
-    """Generate text-based insights"""
+def generate_insights(df, future_overview, top5_data, bottom5_data, comparison):
+    """Generate text-based insights for FUTURE stores"""
     insights = []
 
-    # 1. Overall
-    total_prod = df['Product_Sold_Price'].sum()
-    total_osg = df['OSG_Sold_Price'].sum()
+    # Count future stores
+    future_df = df[df['Is_Future_Store']].copy()
+    total_future = future_df['Branch'].nunique()
+    total_all = df['Branch'].nunique()
+
+    insights.append(
+        f"1. SCOPE: Analysing {total_future} Future Stores out of "
+        f"{total_all} total stores ({total_future / total_all * 100:.1f}%)"
+    )
+
+    # 2. Future stores overall conversion
+    total_prod = future_df['Product_Sold_Price'].sum()
+    total_osg = future_df['OSG_Sold_Price'].sum()
     overall_conv = (total_osg / total_prod * 100) if total_prod > 0 else 0
-    insights.append(f"1. OVERALL: Total Product Sales = ₹{total_prod:,.0f}, "
-                    f"Total OSG Sales = ₹{total_osg:,.0f}, "
-                    f"Overall Conversion = {overall_conv:.2f}%")
+    insights.append(
+        f"2. FUTURE STORES OVERALL: Product Sales = ₹{total_prod:,.0f}, "
+        f"OSG Sales = ₹{total_osg:,.0f}, Conversion = {overall_conv:.2f}%"
+    )
 
-    # 2. Top 5 avg
-    top5_avg = store_overview.head(5)['Value_Conversion_%'].mean()
-    bot5_avg = store_overview.tail(5)['Value_Conversion_%'].mean()
-    insights.append(f"2. TOP 5 STORES Avg Conversion = {top5_avg:.2f}% vs "
-                    f"BOTTOM 5 STORES Avg Conversion = {bot5_avg:.2f}% "
-                    f"(Gap = {top5_avg - bot5_avg:.2f}%)")
+    # 3. Top 5 vs Bottom 5 avg
+    if len(future_overview) >= 5:
+        top5_avg = future_overview.head(5)['Value_Conversion_%'].mean()
+        bot5_avg = future_overview.tail(5)['Value_Conversion_%'].mean()
+        insights.append(
+            f"3. TOP 5 Future Stores Avg = {top5_avg:.2f}% vs "
+            f"BOTTOM 5 Future Stores Avg = {bot5_avg:.2f}% "
+            f"(Gap = {top5_avg - bot5_avg:.2f}%)"
+        )
 
-    # 3. Best performing category across top 5
+    # 4. Best category in top 5
     if len(comparison) > 0:
         best_top = comparison.loc[comparison['Top5_Conversion_%'].idxmax()]
-        insights.append(f"3. BEST CATEGORY in Top 5 Stores: {best_top['Category']} "
-                        f"at {best_top['Top5_Conversion_%']:.2f}% "
-                        f"(Target: {best_top['Target_%']:.0f}%)")
+        insights.append(
+            f"4. BEST CATEGORY in Top 5 Future Stores: {best_top['Category']} "
+            f"at {best_top['Top5_Conversion_%']:.2f}% (Target: {best_top['Target_%']:.0f}%)"
+        )
 
-    # 4. Worst performing category across bottom 5
+    # 5. Worst category in bottom 5
     if len(comparison) > 0:
         worst_bot = comparison.loc[comparison['Bottom5_Conversion_%'].idxmin()]
-        insights.append(f"4. WEAKEST CATEGORY in Bottom 5 Stores: {worst_bot['Category']} "
-                        f"at {worst_bot['Bottom5_Conversion_%']:.2f}% "
-                        f"(Target: {worst_bot['Target_%']:.0f}%)")
+        insights.append(
+            f"5. WEAKEST CATEGORY in Bottom 5 Future Stores: {worst_bot['Category']} "
+            f"at {worst_bot['Bottom5_Conversion_%']:.2f}% (Target: {worst_bot['Target_%']:.0f}%)"
+        )
 
-    # 5. Biggest gap between top and bottom
+    # 6. Biggest gap
     if len(comparison) > 0:
         max_gap = comparison.loc[comparison['Gap_%'].idxmax()]
-        insights.append(f"5. BIGGEST GAP between Top & Bottom: {max_gap['Category']} "
-                        f"— Top5: {max_gap['Top5_Conversion_%']:.2f}%, "
-                        f"Bottom5: {max_gap['Bottom5_Conversion_%']:.2f}%, "
-                        f"Gap: {max_gap['Gap_%']:.2f}%")
+        insights.append(
+            f"6. BIGGEST GAP between Top & Bottom Future Stores: {max_gap['Category']} "
+            f"— Top5: {max_gap['Top5_Conversion_%']:.2f}%, "
+            f"Bottom5: {max_gap['Bottom5_Conversion_%']:.2f}%, Gap: {max_gap['Gap_%']:.2f}%"
+        )
 
-    # 6. Categories where even top 5 are below target
-    below_target_top = comparison[comparison['Top5_vs_Target'] < 0]
-    if len(below_target_top) > 0:
-        cats = ", ".join(below_target_top['Category'].tolist())
-        insights.append(f"6. ALERT — Even Top 5 stores are BELOW target in: {cats}")
-    else:
-        insights.append("6. Top 5 stores are meeting targets in ALL categories ✅")
+    # 7. Categories where even top 5 miss target
+    if len(comparison) > 0:
+        below = comparison[comparison['Top5_vs_Target'] < 0]
+        if len(below) > 0:
+            cats = ", ".join(below['Category'].tolist())
+            insights.append(f"7. ALERT — Even Top 5 Future Stores BELOW target in: {cats}")
+        else:
+            insights.append("7. Top 5 Future Stores meet targets in ALL categories ✅")
 
-    # 7. Categories where bottom 5 meet target
-    above_target_bot = comparison[comparison['Bottom5_vs_Target'] >= 0]
-    if len(above_target_bot) > 0:
-        cats = ", ".join(above_target_bot['Category'].tolist())
-        insights.append(f"7. POSITIVE — Bottom 5 stores MEET target in: {cats}")
-    else:
-        insights.append("7. Bottom 5 stores are below target in ALL categories ⚠️")
+    # 8. Categories where bottom 5 meet target
+    if len(comparison) > 0:
+        above = comparison[comparison['Bottom5_vs_Target'] >= 0]
+        if len(above) > 0:
+            cats = ", ".join(above['Category'].tolist())
+            insights.append(f"8. POSITIVE — Bottom 5 Future Stores MEET target in: {cats}")
+        else:
+            insights.append("8. Bottom 5 Future Stores are below target in ALL categories ⚠️")
 
-    # 8. Best single store
-    best_store = store_overview.iloc[0]
-    insights.append(f"8. BEST STORE: {best_store['Branch']} (RBM: {best_store['RBM']}) "
-                    f"— Conversion: {best_store['Value_Conversion_%']:.2f}%")
+    # 9. Best single future store
+    if len(future_overview) > 0:
+        best = future_overview.iloc[0]
+        insights.append(
+            f"9. BEST FUTURE STORE: {best['Branch']} (RBM: {best['RBM']}) "
+            f"— Conversion: {best['Value_Conversion_%']:.2f}%"
+        )
 
-    # 9. Worst single store
-    worst_store = store_overview.iloc[-1]
-    insights.append(f"9. NEEDS ATTENTION: {worst_store['Branch']} (RBM: {worst_store['RBM']}) "
-                    f"— Conversion: {worst_store['Value_Conversion_%']:.2f}%")
+    # 10. Worst single future store
+    if len(future_overview) > 0:
+        worst = future_overview.iloc[-1]
+        insights.append(
+            f"10. NEEDS ATTENTION: {worst['Branch']} (RBM: {worst['RBM']}) "
+            f"— Conversion: {worst['Value_Conversion_%']:.2f}%"
+        )
 
-    # 10. How many stores meet overall threshold
-    stores_above = len(store_overview[store_overview['Value_Conversion_%'] >= store_overview['Wtd_Target_%']])
-    total_stores = len(store_overview)
-    insights.append(f"10. STORES MEETING WEIGHTED TARGET: {stores_above}/{total_stores} "
-                    f"({stores_above / total_stores * 100:.1f}%)")
+    # 11. How many future stores meet target
+    if len(future_overview) > 0:
+        stores_above = len(future_overview[
+            future_overview['Value_Conversion_%'] >= future_overview['Wtd_Target_%']
+        ])
+        total_s = len(future_overview)
+        insights.append(
+            f"11. FUTURE STORES MEETING TARGET: {stores_above}/{total_s} "
+            f"({stores_above / total_s * 100:.1f}%)"
+        )
+
+    # 12. Recommendation
+    if len(comparison) > 0:
+        worst_gap_cats = comparison.nlargest(2, 'Gap_%')['Category'].tolist()
+        insights.append(
+            f"12. RECOMMENDATION: Focus OSG push in Bottom 5 Future Stores on "
+            f"{', '.join(worst_gap_cats)} — these have the largest performance gap vs top stores"
+        )
 
     return insights
 
 
-def create_excel_report(df):
+def create_excel_report(df, future_keyword):
     """Create full Excel report with all sheets"""
 
     wb = Workbook()
@@ -331,7 +400,6 @@ def create_excel_report(df):
     red_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
     red_font = Font(color='9C0006')
 
-    # Gold/dark green for top 5 rows, dark red for bottom 5 rows
     top5_row_fill = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
     top5_row_font = Font(color='375623', bold=True)
     bot5_row_fill = PatternFill(start_color='FCE4EC', end_color='FCE4EC', fill_type='solid')
@@ -341,7 +409,10 @@ def create_excel_report(df):
     section_font = Font(bold=True, color='FFFFFF', size=12)
 
     insight_fill = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
-    insight_font = Font(color='7F6000', size=11)
+    insight_font_style = Font(color='7F6000', size=11)
+
+    future_label_fill = PatternFill(start_color='DAEEF3', end_color='DAEEF3', fill_type='solid')
+    future_label_font = Font(bold=True, color='1F4E78', size=11)
 
     def apply_header(ws, row, headers, start_col=1):
         for col_idx, h in enumerate(headers, start=start_col):
@@ -360,10 +431,19 @@ def create_excel_report(df):
             if fmt_map and col_idx in fmt_map:
                 cell.number_format = fmt_map[col_idx]
 
-    # ── Build supplementary data ──
-    store_overview = build_store_overview(df)
+    def add_section_header(ws, row, text, end_col=8):
+        cell = ws.cell(row=row, column=1, value=text)
+        cell.font = section_font
+        cell.fill = section_fill
+        for c in range(2, end_col + 1):
+            ws.cell(row=row, column=c).fill = section_fill
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=end_col)
+
+    # ── Build data ──
+    all_store_overview = build_store_overview(df, future_only=False)
+    future_store_overview = build_store_overview(df, future_only=True)
     top5_stores, bottom5_stores, top5_cat, bot5_cat, comparison, insights = \
-        build_top_bottom_analysis(df, store_overview)
+        build_top_bottom_analysis(df, future_store_overview)
 
     # ============================================================
     # SHEET 1: RBM Summary
@@ -405,27 +485,73 @@ def create_excel_report(df):
         ws_summary.column_dimensions[get_column_letter(c)].width = 25
 
     # ============================================================
-    # SHEET 2: Store-wise Overview  (NEW)
+    # SHEET 2: Store-wise Overview (ALL stores)
     # ============================================================
-    ws_store = wb.create_sheet('Store Overview')
-    ws_store['A1'] = 'STORE-WISE OVERALL CONVERSION REPORT'
+    ws_store = wb.create_sheet('Store Overview - All')
+    ws_store['A1'] = 'STORE-WISE OVERALL CONVERSION — ALL STORES'
     ws_store['A1'].font = Font(bold=True, size=16, color='1F4E78')
-    ws_store.merge_cells('A1:I1')
+    ws_store.merge_cells('A1:J1')
     ws_store['A1'].alignment = Alignment(horizontal='center')
 
-    ws_store['A2'] = '🟢 Green = Top 5 Stores  |  🔴 Red = Bottom 5 Stores'
+    ws_store['A2'] = '🔷 Future Store rows highlighted in blue'
     ws_store['A2'].font = Font(italic=True, size=10, color='666666')
-    ws_store.merge_cells('A2:I2')
+    ws_store.merge_cells('A2:J2')
 
-    st_headers = ['Rank', 'Branch', 'RBM', 'Product Sold Price', 'OSG Sold Price',
-                  'Value Conversion (%)', 'Wtd. Target (%)', 'Need to Achieve (%)',
-                  'Categories Met']
+    st_headers = ['Rank', 'Branch', 'RBM', 'Store Type', 'Product Sold Price',
+                  'OSG Sold Price', 'Value Conversion (%)', 'Wtd. Target (%)',
+                  'Need to Achieve (%)', 'Categories Met']
     apply_header(ws_store, 4, st_headers)
 
-    st_fmt = {4: '₹#,##0.00', 5: '₹#,##0.00', 6: '0.00"%"', 7: '0.00"%"', 8: '0.00"%"'}
-    total_stores = len(store_overview)
+    st_fmt = {5: '₹#,##0.00', 6: '₹#,##0.00', 7: '0.00"%"', 8: '0.00"%"', 9: '0.00"%"'}
 
-    for r_idx, (_, row) in enumerate(store_overview.iterrows(), start=5):
+    for r_idx, (_, row) in enumerate(all_store_overview.iterrows(), start=5):
+        is_future = is_future_store(row['Branch'])
+        store_type = 'FUTURE' if is_future else 'OTHER'
+        vals = [
+            int(row['Rank']), row['Branch'], row['RBM'], store_type,
+            row['Product_Sold_Price'], row['OSG_Sold_Price'],
+            row['Value_Conversion_%'], row['Wtd_Target_%'],
+            row['Need_to_Achieve_%'],
+            f"{int(row['Categories_Target_Met'])}/{int(row['Total_Categories'])}"
+        ]
+        write_row(ws_store, r_idx, vals, fmt_map=st_fmt)
+
+        # Highlight Future stores with blue tint
+        if is_future:
+            for c in range(1, 11):
+                cell = ws_store.cell(row=r_idx, column=c)
+                cell.fill = future_label_fill
+                cell.font = future_label_font
+
+    widths = [8, 35, 20, 14, 22, 20, 22, 18, 22, 16]
+    for i, w in enumerate(widths, start=1):
+        ws_store.column_dimensions[get_column_letter(i)].width = w
+
+    # ============================================================
+    # SHEET 3: Future Store Overview (FUTURE only)
+    # ============================================================
+    ws_future = wb.create_sheet('Future Store Ranking')
+    ws_future['A1'] = 'FUTURE STORES — CONVERSION RANKING'
+    ws_future['A1'].font = Font(bold=True, size=16, color='1F4E78')
+    ws_future.merge_cells('A1:I1')
+    ws_future['A1'].alignment = Alignment(horizontal='center')
+
+    future_count = len(future_store_overview)
+    ws_future['A2'] = (
+        f'Total Future Stores: {future_count} | '
+        f'🟢 Top 5 highlighted green | 🔴 Bottom 5 highlighted red'
+    )
+    ws_future['A2'].font = Font(italic=True, size=10, color='666666')
+    ws_future.merge_cells('A2:I2')
+
+    fs_headers = ['Rank', 'Branch', 'RBM', 'Product Sold Price', 'OSG Sold Price',
+                  'Value Conversion (%)', 'Wtd. Target (%)', 'Need to Achieve (%)',
+                  'Categories Met']
+    apply_header(ws_future, 4, fs_headers)
+
+    fs_fmt = {4: '₹#,##0.00', 5: '₹#,##0.00', 6: '0.00"%"', 7: '0.00"%"', 8: '0.00"%"'}
+
+    for r_idx, (_, row) in enumerate(future_store_overview.iterrows(), start=5):
         rank = row['Rank']
         vals = [
             int(rank), row['Branch'], row['RBM'],
@@ -434,44 +560,42 @@ def create_excel_report(df):
             row['Need_to_Achieve_%'],
             f"{int(row['Categories_Target_Met'])}/{int(row['Total_Categories'])}"
         ]
-        write_row(ws_store, r_idx, vals, fmt_map=st_fmt)
+        write_row(ws_future, r_idx, vals, fmt_map=fs_fmt)
 
-        # Highlight top 5 and bottom 5
         is_top5 = rank <= 5
-        is_bot5 = rank > total_stores - 5
+        is_bot5 = rank > future_count - 5
 
         if is_top5:
             for c in range(1, 10):
-                cell = ws_store.cell(row=r_idx, column=c)
-                cell.fill = top5_row_fill
-                cell.font = top5_row_font
+                ws_future.cell(row=r_idx, column=c).fill = top5_row_fill
+                ws_future.cell(row=r_idx, column=c).font = top5_row_font
         elif is_bot5:
             for c in range(1, 10):
-                cell = ws_store.cell(row=r_idx, column=c)
-                cell.fill = bot5_row_fill
-                cell.font = bot5_row_font
+                ws_future.cell(row=r_idx, column=c).fill = bot5_row_fill
+                ws_future.cell(row=r_idx, column=c).font = bot5_row_font
 
-    widths = [8, 35, 20, 22, 20, 22, 18, 22, 16]
-    for i, w in enumerate(widths, start=1):
-        ws_store.column_dimensions[get_column_letter(i)].width = w
+    fs_widths = [8, 35, 20, 22, 20, 22, 18, 22, 16]
+    for i, w in enumerate(fs_widths, start=1):
+        ws_future.column_dimensions[get_column_letter(i)].width = w
 
     # ============================================================
-    # SHEET 3: Top 5 vs Bottom 5 Analysis  (NEW)
+    # SHEET 4: Top 5 vs Bottom 5 FUTURE Stores Analysis
     # ============================================================
-    ws_tb = wb.create_sheet('Top5 vs Bottom5 Analysis')
-    ws_tb['A1'] = 'TOP 5 vs BOTTOM 5 STORES — CATEGORY ANALYSIS & INSIGHTS'
-    ws_tb['A1'].font = Font(bold=True, size=16, color='1F4E78')
+    ws_tb = wb.create_sheet('Top5 vs Bottom5 Future')
+    ws_tb['A1'] = 'TOP 5 vs BOTTOM 5 FUTURE STORES — CATEGORY ANALYSIS & INSIGHTS'
+    ws_tb['A1'].font = Font(bold=True, size=14, color='1F4E78')
     ws_tb.merge_cells('A1:H1')
     ws_tb['A1'].alignment = Alignment(horizontal='center')
 
-    current_row = 3
+    ws_tb['A2'] = '⚡ Analysis restricted to FUTURE STORES only'
+    ws_tb['A2'].font = Font(bold=True, italic=True, size=11, color='C00000')
+    ws_tb.merge_cells('A2:H2')
 
-    # ── Section A: Top 5 Stores List ──
-    cell = ws_tb.cell(row=current_row, column=1, value='🏆 TOP 5 STORES (Highest Conversion)')
-    cell.font = section_font; cell.fill = section_fill
-    for c in range(2, 9):
-        ws_tb.cell(row=current_row, column=c).fill = section_fill
-    ws_tb.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=8)
+    current_row = 4
+
+    # ── Section A: Top 5 Future Stores ──
+    add_section_header(ws_tb, current_row,
+                       '🏆 TOP 5 FUTURE STORES (Highest Conversion)')
     current_row += 1
 
     top5_detail_headers = ['#', 'Branch', 'RBM', 'Product Sold Price',
@@ -479,7 +603,9 @@ def create_excel_report(df):
     apply_header(ws_tb, current_row, top5_detail_headers)
     current_row += 1
 
-    top5_overview = store_overview[store_overview['Branch'].isin(top5_stores)]
+    top5_overview = future_store_overview[
+        future_store_overview['Branch'].isin(top5_stores)
+    ]
     for i, (_, row) in enumerate(top5_overview.iterrows(), start=1):
         vals = [i, row['Branch'], row['RBM'],
                 row['Product_Sold_Price'], row['OSG_Sold_Price'],
@@ -493,18 +619,17 @@ def create_excel_report(df):
 
     current_row += 1
 
-    # ── Section B: Bottom 5 Stores List ──
-    cell = ws_tb.cell(row=current_row, column=1, value='⚠️ BOTTOM 5 STORES (Lowest Conversion)')
-    cell.font = section_font; cell.fill = section_fill
-    for c in range(2, 9):
-        ws_tb.cell(row=current_row, column=c).fill = section_fill
-    ws_tb.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=8)
+    # ── Section B: Bottom 5 Future Stores ──
+    add_section_header(ws_tb, current_row,
+                       '⚠️ BOTTOM 5 FUTURE STORES (Lowest Conversion)')
     current_row += 1
 
     apply_header(ws_tb, current_row, top5_detail_headers)
     current_row += 1
 
-    bot5_overview = store_overview[store_overview['Branch'].isin(bottom5_stores)]
+    bot5_overview = future_store_overview[
+        future_store_overview['Branch'].isin(bottom5_stores)
+    ]
     for i, (_, row) in enumerate(bot5_overview.iterrows(), start=1):
         vals = [i, row['Branch'], row['RBM'],
                 row['Product_Sold_Price'], row['OSG_Sold_Price'],
@@ -518,13 +643,9 @@ def create_excel_report(df):
 
     current_row += 2
 
-    # ── Section C: Category-wise Comparison ──
-    cell = ws_tb.cell(row=current_row, column=1,
-                      value='📊 CATEGORY-WISE COMPARISON: TOP 5 vs BOTTOM 5')
-    cell.font = section_font; cell.fill = section_fill
-    for c in range(2, 9):
-        ws_tb.cell(row=current_row, column=c).fill = section_fill
-    ws_tb.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=8)
+    # ── Section C: Category Comparison ──
+    add_section_header(ws_tb, current_row,
+                       '📊 CATEGORY COMPARISON: TOP 5 vs BOTTOM 5 FUTURE STORES')
     current_row += 1
 
     comp_headers = ['Category', 'Target %', 'Top 5 Conversion (%)',
@@ -534,41 +655,36 @@ def create_excel_report(df):
     current_row += 1
 
     for _, crow in comparison.iterrows():
-        # Verdict
         if crow['Top5_vs_Target'] >= 0 and crow['Bottom5_vs_Target'] >= 0:
-            verdict = '✅ Both groups meet target'
+            verdict = '✅ Both meet target'
         elif crow['Top5_vs_Target'] >= 0 and crow['Bottom5_vs_Target'] < 0:
             verdict = '⚠️ Bottom 5 need improvement'
         elif crow['Top5_vs_Target'] < 0 and crow['Bottom5_vs_Target'] < 0:
-            verdict = '🚨 Both groups below target'
+            verdict = '🚨 Both below target'
         else:
             verdict = '🔍 Review needed'
 
-        vals = [
-            crow['Category'], crow['Target_%'],
-            crow['Top5_Conversion_%'], crow['Bottom5_Conversion_%'],
-            crow['Gap_%'], crow['Top5_vs_Target'],
-            crow['Bottom5_vs_Target'], verdict
-        ]
+        vals = [crow['Category'], crow['Target_%'],
+                crow['Top5_Conversion_%'], crow['Bottom5_Conversion_%'],
+                crow['Gap_%'], crow['Top5_vs_Target'],
+                crow['Bottom5_vs_Target'], verdict]
         write_row(ws_tb, current_row, vals,
                   fmt_map={2: '0.00"%"', 3: '0.00"%"', 4: '0.00"%"',
                            5: '0.00"%"', 6: '0.00"%"', 7: '0.00"%"'})
 
-        # Colour the gap cell
         gap_cell = ws_tb.cell(row=current_row, column=5)
         if crow['Gap_%'] > 3:
             gap_cell.fill = red_fill; gap_cell.font = red_font
         elif crow['Gap_%'] > 0:
-            gap_cell.fill = PatternFill(start_color='FFFFCC', end_color='FFFFCC', fill_type='solid')
+            gap_cell.fill = PatternFill(
+                start_color='FFFFCC', end_color='FFFFCC', fill_type='solid')
 
-        # Colour top5 vs target
         t5_cell = ws_tb.cell(row=current_row, column=6)
         if crow['Top5_vs_Target'] >= 0:
             t5_cell.fill = green_fill; t5_cell.font = green_font
         else:
             t5_cell.fill = red_fill; t5_cell.font = red_font
 
-        # Colour bottom5 vs target
         b5_cell = ws_tb.cell(row=current_row, column=7)
         if crow['Bottom5_vs_Target'] >= 0:
             b5_cell.fill = green_fill; b5_cell.font = green_font
@@ -579,13 +695,9 @@ def create_excel_report(df):
 
     current_row += 2
 
-    # ── Section D: Category Detail — Top 5 Stores ──
-    cell = ws_tb.cell(row=current_row, column=1,
-                      value='📋 CATEGORY DETAIL — TOP 5 STORES (Aggregated)')
-    cell.font = section_font; cell.fill = section_fill
-    for c in range(2, 9):
-        ws_tb.cell(row=current_row, column=c).fill = section_fill
-    ws_tb.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=8)
+    # ── Section D: Category Detail — Top 5 ──
+    add_section_header(ws_tb, current_row,
+                       '📋 CATEGORY DETAIL — TOP 5 FUTURE STORES (Aggregated)')
     current_row += 1
 
     cat_headers = ['Category', 'Product Sold Price', 'OSG Sold Price',
@@ -608,13 +720,9 @@ def create_excel_report(df):
 
     current_row += 1
 
-    # ── Section E: Category Detail — Bottom 5 Stores ──
-    cell = ws_tb.cell(row=current_row, column=1,
-                      value='📋 CATEGORY DETAIL — BOTTOM 5 STORES (Aggregated)')
-    cell.font = section_font; cell.fill = section_fill
-    for c in range(2, 9):
-        ws_tb.cell(row=current_row, column=c).fill = section_fill
-    ws_tb.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=8)
+    # ── Section E: Category Detail — Bottom 5 ──
+    add_section_header(ws_tb, current_row,
+                       '📋 CATEGORY DETAIL — BOTTOM 5 FUTURE STORES (Aggregated)')
     current_row += 1
 
     apply_header(ws_tb, current_row, cat_headers)
@@ -636,16 +744,13 @@ def create_excel_report(df):
     current_row += 2
 
     # ── Section F: Insights ──
-    cell = ws_tb.cell(row=current_row, column=1, value='💡 KEY INSIGHTS & RECOMMENDATIONS')
-    cell.font = section_font; cell.fill = section_fill
-    for c in range(2, 9):
-        ws_tb.cell(row=current_row, column=c).fill = section_fill
-    ws_tb.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=8)
+    add_section_header(ws_tb, current_row,
+                       '💡 KEY INSIGHTS & RECOMMENDATIONS — FUTURE STORES')
     current_row += 1
 
     for insight in insights:
         cell = ws_tb.cell(row=current_row, column=1, value=insight)
-        cell.font = insight_font
+        cell.font = insight_font_style
         cell.fill = insight_fill
         ws_tb.merge_cells(start_row=current_row, start_column=1,
                           end_row=current_row, end_column=8)
@@ -653,19 +758,18 @@ def create_excel_report(df):
         ws_tb.row_dimensions[current_row].height = 30
         current_row += 1
 
-    # Column widths for analysis sheet
     tb_widths = [22, 25, 25, 22, 22, 22, 22, 35]
     for i, w in enumerate(tb_widths, start=1):
         ws_tb.column_dimensions[get_column_letter(i)].width = w
 
     # ============================================================
-    # SHEETS 4+: Individual RBM sheets (existing logic)
+    # SHEETS 5+: Individual RBM sheets
     # ============================================================
     rbms = sorted(df['RBM'].unique())
 
     for rbm in rbms:
         rbm_data = df[df['RBM'] == rbm].copy()
-        rbm_data = rbm_data.drop(['RBM', 'Target_Achieved'], axis=1)
+        rbm_data = rbm_data.drop(['RBM', 'Target_Achieved', 'Is_Future_Store'], axis=1)
         rbm_data = rbm_data.sort_values(['Branch', 'Category'])
 
         sheet_name = str(rbm)[:31]
@@ -683,7 +787,6 @@ def create_excel_report(df):
         r_fmt = {3: '₹#,##0.00', 4: '₹#,##0.00', 5: '0.00"%"', 6: '0.00"%"', 7: '0.00"%"'}
         for row_idx, row_data in enumerate(rbm_data.values, start=4):
             write_row(ws, row_idx, row_data, fmt_map=r_fmt)
-
             need_cell = ws.cell(row=row_idx, column=7)
             conv_val = row_data[4]
             target_val = row_data[5]
@@ -709,8 +812,7 @@ def create_excel_report(df):
         ws.cell(row=sr, column=4, value=f'=SUM(D4:D{last_row})')
         ws.cell(row=sr, column=4).number_format = '₹#,##0.00'
         ws.cell(row=sr, column=4).font = Font(bold=True)
-        ws.cell(row=sr, column=5,
-                value=f'=IF(C{sr}>0,(D{sr}/C{sr})*100,0)')
+        ws.cell(row=sr, column=5, value=f'=IF(C{sr}>0,(D{sr}/C{sr})*100,0)')
         ws.cell(row=sr, column=5).number_format = '0.00"%"'
         ws.cell(row=sr, column=5).font = Font(bold=True)
 
@@ -724,6 +826,15 @@ def main():
         "Upload Product File (Excel)", type=['xlsx', 'xls'], key='product')
     osg_file = st.sidebar.file_uploader(
         "Upload OSG File (Excel)", type=['xlsx', 'xls'], key='osg')
+
+    # ── Future store keyword ──
+    st.sidebar.markdown("---")
+    st.sidebar.header("🏪 Future Store Filter")
+    future_keyword = st.sidebar.text_input(
+        "Keyword to identify Future Stores (in branch name)",
+        value="FUTURE",
+        help="Branches containing this keyword will be treated as Future Stores"
+    )
 
     if product_file and osg_file:
         with st.spinner("Loading files..."):
@@ -745,7 +856,6 @@ def main():
                 (c for c in product_df.columns if 'CATEGORY' in c.upper()), None)
             osg_cat_col = next(
                 (c for c in osg_df.columns if 'CATEGORY' in c.upper()), None)
-
             with c1:
                 if product_cat_col:
                     st.write("**Product Categories:**")
@@ -764,21 +874,42 @@ def main():
             if processed_df is not None:
                 st.success(f"✅ {len(processed_df)} records processed")
 
-                # ── Build supplementary data for display ──
-                store_overview = build_store_overview(processed_df)
-                top5_stores, bottom5_stores, top5_cat, bot5_cat, comparison, insights = \
-                    build_top_bottom_analysis(processed_df, store_overview)
+                # ── Stats ──
+                future_count = processed_df[processed_df['Is_Future_Store']]['Branch'].nunique()
+                total_stores = processed_df['Branch'].nunique()
 
-                # ── Tabs for preview ──
-                tab1, tab2, tab3, tab4 = st.tabs([
-                    "📊 RBM Summary", "🏪 Store Overview",
-                    "🏆 Top 5 vs Bottom 5", "💡 Insights"
+                st.info(
+                    f"🏪 **Future Stores detected: {future_count}** out of "
+                    f"{total_stores} total stores "
+                    f"(keyword: '{future_keyword}')"
+                )
+
+                if future_count == 0:
+                    st.warning(
+                        "⚠️ No Future Stores found! Check if your branch names "
+                        f"contain '{future_keyword}'. You can change the keyword in the sidebar."
+                    )
+
+                    # Show sample branch names for debugging
+                    sample_branches = processed_df['Branch'].unique()[:20]
+                    st.write("**Sample branch names in your data:**")
+                    st.write(list(sample_branches))
+
+                # ── Build analysis ──
+                all_store_overview = build_store_overview(processed_df, future_only=False)
+                future_store_overview = build_store_overview(processed_df, future_only=True)
+                top5_stores, bottom5_stores, top5_cat, bot5_cat, comparison, insights = \
+                    build_top_bottom_analysis(processed_df, future_store_overview)
+
+                # ── Tabs ──
+                tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                    "📊 RBM Summary", "🏪 All Stores",
+                    "🔷 Future Stores", "🏆 Top5 vs Bottom5", "💡 Insights"
                 ])
 
                 with tab1:
                     st.subheader("RBM-wise Data Preview")
                     st.dataframe(processed_df.head(30), use_container_width=True)
-
                     c1, c2, c3, c4 = st.columns(4)
                     with c1:
                         st.metric("Total Product Sales",
@@ -791,53 +922,82 @@ def main():
                               processed_df['Product_Sold_Price'].sum() * 100)
                         st.metric("Overall Conversion", f"{oc:.2f}%")
                     with c4:
-                        ach = processed_df['Target_Achieved'].sum()
-                        tot = len(processed_df)
-                        st.metric("Targets Met", f"{ach}/{tot}")
+                        st.metric("Targets Met",
+                                  f"{processed_df['Target_Achieved'].sum()}/{len(processed_df)}")
 
                 with tab2:
-                    st.subheader("🏪 Store-wise Conversion Ranking")
-                    st.dataframe(
-                        store_overview[[
-                            'Rank', 'Branch', 'RBM', 'Product_Sold_Price',
-                            'OSG_Sold_Price', 'Value_Conversion_%',
-                            'Categories_Target_Met', 'Total_Categories'
-                        ]].style.apply(
-                            lambda row: [
-                                'background-color: #C6EFCE; color: #006100; font-weight: bold'
-                                if row['Rank'] <= 5
-                                else ('background-color: #FFC7CE; color: #9C0006; font-weight: bold'
-                                      if row['Rank'] > len(store_overview) - 5
-                                      else '')
-                            ] * len(row), axis=1
-                        ),
-                        use_container_width=True
-                    )
+                    st.subheader("🏪 All Stores Ranking")
+                    if len(all_store_overview) > 0:
+                        display_cols = ['Rank', 'Branch', 'RBM', 'Product_Sold_Price',
+                                        'OSG_Sold_Price', 'Value_Conversion_%',
+                                        'Categories_Target_Met', 'Total_Categories']
+                        st.dataframe(all_store_overview[display_cols],
+                                     use_container_width=True)
 
                 with tab3:
-                    st.subheader("🏆 Top 5 Stores")
-                    st.dataframe(
-                        store_overview[store_overview['Branch'].isin(top5_stores)][[
-                            'Branch', 'RBM', 'Value_Conversion_%'
-                        ]], use_container_width=True)
+                    st.subheader("🔷 Future Stores Ranking")
+                    if len(future_store_overview) > 0:
+                        display_cols = ['Rank', 'Branch', 'RBM', 'Product_Sold_Price',
+                                        'OSG_Sold_Price', 'Value_Conversion_%',
+                                        'Categories_Target_Met', 'Total_Categories']
 
-                    st.subheader("⚠️ Bottom 5 Stores")
-                    st.dataframe(
-                        store_overview[store_overview['Branch'].isin(bottom5_stores)][[
-                            'Branch', 'RBM', 'Value_Conversion_%'
-                        ]], use_container_width=True)
+                        def highlight_top_bottom(row):
+                            if row['Rank'] <= 5:
+                                return ['background-color: #C6EFCE; color: #006100; '
+                                        'font-weight: bold'] * len(row)
+                            elif row['Rank'] > len(future_store_overview) - 5:
+                                return ['background-color: #FFC7CE; color: #9C0006; '
+                                        'font-weight: bold'] * len(row)
+                            return [''] * len(row)
 
-                    st.subheader("📊 Category Comparison")
-                    st.dataframe(comparison, use_container_width=True)
+                        st.dataframe(
+                            future_store_overview[display_cols].style.apply(
+                                highlight_top_bottom, axis=1),
+                            use_container_width=True
+                        )
+
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            f_prod = future_store_overview['Product_Sold_Price'].sum()
+                            f_osg = future_store_overview['OSG_Sold_Price'].sum()
+                            f_conv = (f_osg / f_prod * 100) if f_prod > 0 else 0
+                            st.metric("Future Stores Conversion", f"{f_conv:.2f}%")
+                        with c2:
+                            st.metric("Future Stores Count", future_count)
+                    else:
+                        st.warning("No Future Stores found.")
 
                 with tab4:
-                    st.subheader("💡 Key Insights")
+                    if len(future_store_overview) > 0:
+                        st.subheader("🏆 Top 5 Future Stores")
+                        st.dataframe(
+                            future_store_overview[
+                                future_store_overview['Branch'].isin(top5_stores)
+                            ][['Branch', 'RBM', 'Value_Conversion_%']],
+                            use_container_width=True
+                        )
+
+                        st.subheader("⚠️ Bottom 5 Future Stores")
+                        st.dataframe(
+                            future_store_overview[
+                                future_store_overview['Branch'].isin(bottom5_stores)
+                            ][['Branch', 'RBM', 'Value_Conversion_%']],
+                            use_container_width=True
+                        )
+
+                        st.subheader("📊 Category Comparison (Future Stores Only)")
+                        st.dataframe(comparison, use_container_width=True)
+                    else:
+                        st.warning("No Future Stores found for analysis.")
+
+                with tab5:
+                    st.subheader("💡 Key Insights — Future Stores")
                     for insight in insights:
                         st.info(insight)
 
                 # ── Generate Excel ──
                 with st.spinner("Creating Excel report..."):
-                    wb = create_excel_report(processed_df)
+                    wb = create_excel_report(processed_df, future_keyword)
                     buffer = BytesIO()
                     wb.save(buffer)
                     buffer.seek(0)
@@ -851,29 +1011,44 @@ def main():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-                st.subheader("📑 Excel Sheets:")
+                st.subheader("📑 Excel Sheets in Report:")
                 rbms = sorted(processed_df['RBM'].unique())
                 st.markdown(f"""
-                1. **RBM Summary** — Overall RBM performance
-                2. **Store Overview** — All stores ranked by conversion (Top 5 🟢 / Bottom 5 🔴)
-                3. **Top5 vs Bottom5 Analysis** — Category comparison + Insights
-                4. **{len(rbms)} RBM Sheets** — {', '.join(rbms)}
+                | # | Sheet | Description |
+                |---|-------|-------------|
+                | 1 | **RBM Summary** | RBM-wise conversion vs weighted target |
+                | 2 | **Store Overview - All** | All stores ranked with Future stores highlighted 🔷 |
+                | 3 | **Future Store Ranking** | Only Future stores ranked — Top 5 🟢 Bottom 5 🔴 |
+                | 4 | **Top5 vs Bottom5 Future** | Category comparison + insights for Future stores only |
+                | 5–{4 + len(rbms)} | **{len(rbms)} RBM Sheets** | {', '.join(rbms)} |
                 """)
 
     else:
         st.info("👆 Upload both Product and OSG files")
-        st.markdown("""
-        ### 📊 This tool generates 3 reports in one Excel file:
+        st.markdown(f"""
+        ### 📊 Report Structure (5 types of sheets):
 
-        | Sheet | Contents |
-        |-------|----------|
+        | Sheet | What it contains |
+        |-------|------------------|
         | **RBM Summary** | RBM-wise conversion vs weighted target |
-        | **Store Overview** | All stores ranked — Top 5 🟢 highlighted, Bottom 5 🔴 highlighted |
-        | **Top5 vs Bottom5 Analysis** | Category breakdown, comparison table, gap analysis & 10 auto-generated insights |
-        | **Individual RBM sheets** | Branch × Category detail per RBM |
+        | **Store Overview - All** | Every store ranked, Future stores highlighted 🔷 |
+        | **Future Store Ranking** | Only Future stores, Top 5 🟢 / Bottom 5 🔴 |
+        | **Top5 vs Bottom5 Future** | Category analysis + comparison + 12 auto-insights |
+        | **RBM Sheets** | Branch × Category detail per RBM |
+
+        ### 🏪 Future Store Detection:
+        - Stores with **"FUTURE"** in branch name are auto-detected
+        - You can change the keyword in the sidebar
+        - Also matches **FRL**, **FRETAIL** patterns
 
         ### 🎯 Targets:
-        TV: 5% · Microwave: 5% · Refrigerator: 2% · AC: 1% · Washing Machine: 3% · Small Appliance: 2%
+        TV: 5% · Microwave: 5% · Refrigerator: 2% · AC: 1% · WM: 3% · Small Appliance: 2%
+
+        ### 🏆 Top5 vs Bottom5 Analysis includes:
+        1. Top 5 & Bottom 5 Future store lists with RBM & conversion
+        2. Category-by-category comparison table with verdicts
+        3. Aggregated category detail for each group
+        4. **12 auto-generated insights** covering gaps, alerts & recommendations
         """)
 
 
