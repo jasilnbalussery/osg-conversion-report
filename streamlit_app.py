@@ -32,18 +32,34 @@ def normalize_category(category):
         if cat_upper == target_cat:
             return target_cat
     
-    # Partial matches
-    if 'TV' in cat_upper or 'TELEVISION' in cat_upper:
-        return 'TV'
-    elif 'MICROWAVE' in cat_upper or 'OVEN' in cat_upper:
-        return 'MICROWAVE OVEN'
-    elif 'REFRIGERATOR' in cat_upper or 'FRIDGE' in cat_upper or 'REF' in cat_upper:
-        return 'REFRIGERATOR'
-    elif 'AC' in cat_upper or 'AIR CONDITIONER' in cat_upper or 'AIRCONDITIONER' in cat_upper:
-        return 'AC'
-    elif 'WASHING' in cat_upper or 'WASHER' in cat_upper or 'WM' in cat_upper:
+    # Partial matches - Order matters! Check more specific patterns first
+    # Check for Washing Machine BEFORE checking for AC (to avoid 'WM' being caught by 'AC')
+    if 'WASHING MACHINE' in cat_upper or 'WASHING' in cat_upper or 'WASHER' in cat_upper:
         return 'WASHING MACHINE'
-    elif 'SMALL APPLIANCE' in cat_upper or 'SA' in cat_upper:
+    elif 'WM' == cat_upper or cat_upper.startswith('WM ') or ' WM' in cat_upper or cat_upper.endswith(' WM'):
+        return 'WASHING MACHINE'
+    # Check for TV
+    elif 'TELEVISION' in cat_upper or cat_upper == 'TV' or cat_upper.startswith('TV ') or ' TV' in cat_upper or cat_upper.endswith(' TV'):
+        return 'TV'
+    # Check for Microwave Oven
+    elif 'MICROWAVE' in cat_upper or ('MICRO' in cat_upper and 'WAVE' in cat_upper):
+        return 'MICROWAVE OVEN'
+    elif 'OVEN' in cat_upper and 'MICROWAVE' not in cat_upper:
+        return 'MICROWAVE OVEN'
+    # Check for Refrigerator
+    elif 'REFRIGERATOR' in cat_upper or 'FRIDGE' in cat_upper or 'REFG' in cat_upper:
+        return 'REFRIGERATOR'
+    elif 'REF' == cat_upper or cat_upper.startswith('REF ') or ' REF' in cat_upper or cat_upper.endswith(' REF'):
+        return 'REFRIGERATOR'
+    # Check for AC - Be careful with this to not catch other abbreviations
+    elif 'AIR CONDITIONER' in cat_upper or 'AIRCONDITIONER' in cat_upper or 'AIR CONDITION' in cat_upper:
+        return 'AC'
+    elif 'AC' == cat_upper or cat_upper.startswith('AC ') or ' AC' in cat_upper or cat_upper.endswith(' AC'):
+        return 'AC'
+    # Check for Small Appliance
+    elif 'SMALL APPLIANCE' in cat_upper or 'SMALL APP' in cat_upper:
+        return 'SMALL APPLIANCE'
+    elif 'SA' == cat_upper or cat_upper.startswith('SA ') or ' SA' in cat_upper or cat_upper.endswith(' SA'):
         return 'SMALL APPLIANCE'
     
     return None  # Categories not in target list
@@ -212,7 +228,7 @@ def create_excel_report(df):
         # Add title
         ws['A1'] = f'Target Achievement Report - {rbm}'
         ws['A1'].font = Font(bold=True, size=14, color='1F4E78')
-        ws.merge_cells('A1:H1')
+        ws.merge_cells('A1:G1')
         ws['A1'].alignment = Alignment(horizontal='center')
         
         # Headers
@@ -247,40 +263,40 @@ def create_excel_report(df):
                     cell.number_format = '0.00"%"'
         
         # Column widths
-        ws.column_dimensions['A'].width = 25  # Branch
+        ws.column_dimensions['A'].width = 30  # Branch
         ws.column_dimensions['B'].width = 20  # Category
         ws.column_dimensions['C'].width = 20  # Product Sold Price
         ws.column_dimensions['D'].width = 18  # OSG Sold Price
         ws.column_dimensions['E'].width = 22  # Value Conversion %
-        ws.column_dimensions['F'].width = 28  # Need to Achieve Target
+        ws.column_dimensions['F'].width = 30  # Need to Achieve Target
         ws.column_dimensions['G'].width = 12  # Target %
         
         # Add summary at bottom
-        last_row = len(rbm_data) + 4
-        ws.cell(row=last_row + 1, column=1, value='TOTAL').font = Font(bold=True)
+        last_row = len(rbm_data) + 3
+        ws.cell(row=last_row + 2, column=1, value='TOTAL').font = Font(bold=True)
         
         # Total formulas
-        ws.cell(row=last_row + 1, column=3, value=f'=SUM(C4:C{last_row})')
-        ws.cell(row=last_row + 1, column=3).number_format = '₹#,##0.00'
-        ws.cell(row=last_row + 1, column=3).font = Font(bold=True)
+        ws.cell(row=last_row + 2, column=3, value=f'=SUM(C4:C{last_row})')
+        ws.cell(row=last_row + 2, column=3).number_format = '₹#,##0.00'
+        ws.cell(row=last_row + 2, column=3).font = Font(bold=True)
         
-        ws.cell(row=last_row + 1, column=4, value=f'=SUM(D4:D{last_row})')
-        ws.cell(row=last_row + 1, column=4).number_format = '₹#,##0.00'
-        ws.cell(row=last_row + 1, column=4).font = Font(bold=True)
+        ws.cell(row=last_row + 2, column=4, value=f'=SUM(D4:D{last_row})')
+        ws.cell(row=last_row + 2, column=4).number_format = '₹#,##0.00'
+        ws.cell(row=last_row + 2, column=4).font = Font(bold=True)
         
-        ws.cell(row=last_row + 1, column=5, value=f'=IF(C{last_row + 1}>0,(D{last_row + 1}/C{last_row + 1})*100,0)')
-        ws.cell(row=last_row + 1, column=5).number_format = '0.00"%"'
-        ws.cell(row=last_row + 1, column=5).font = Font(bold=True)
+        ws.cell(row=last_row + 2, column=5, value=f'=IF(C{last_row + 2}>0,(D{last_row + 2}/C{last_row + 2})*100,0)')
+        ws.cell(row=last_row + 2, column=5).number_format = '0.00"%"'
+        ws.cell(row=last_row + 2, column=5).font = Font(bold=True)
         
-        ws.cell(row=last_row + 1, column=6, value=f'=SUM(F4:F{last_row})')
-        ws.cell(row=last_row + 1, column=6).number_format = '₹#,##0.00'
-        ws.cell(row=last_row + 1, column=6).font = Font(bold=True)
+        ws.cell(row=last_row + 2, column=6, value=f'=SUM(F4:F{last_row})')
+        ws.cell(row=last_row + 2, column=6).number_format = '₹#,##0.00'
+        ws.cell(row=last_row + 2, column=6).font = Font(bold=True)
     
     # Create Summary sheet
     ws_summary = wb.create_sheet('Summary', 0)
     ws_summary['A1'] = 'OSG TARGET ACHIEVEMENT SUMMARY'
     ws_summary['A1'].font = Font(bold=True, size=16, color='1F4E78')
-    ws_summary.merge_cells('A1:G1')
+    ws_summary.merge_cells('A1:E1')
     ws_summary['A1'].alignment = Alignment(horizontal='center')
     
     # RBM-wise summary
@@ -345,6 +361,54 @@ def main():
                 st.write("**OSG File Columns:**")
                 st.write(osg_df.columns.tolist())
         
+        # Show unique categories for debugging
+        with st.expander("🔍 Category Analysis (Debug Info)"):
+            col1, col2 = st.columns(2)
+            
+            # Find category column
+            product_cat_col = None
+            osg_cat_col = None
+            
+            for col in product_df.columns:
+                if 'CATEGORY' in col.upper() or 'ITEM CATEGORY' in col.upper():
+                    product_cat_col = col
+                    break
+            
+            for col in osg_df.columns:
+                if 'CATEGORY' in col.upper():
+                    osg_cat_col = col
+                    break
+            
+            with col1:
+                st.write("**Product File Unique Categories:**")
+                if product_cat_col:
+                    unique_cats = product_df[product_cat_col].value_counts().head(20)
+                    st.dataframe(unique_cats, use_container_width=True)
+                    
+                    # Show what they normalize to
+                    st.write("**Category Mapping Preview:**")
+                    sample_cats = product_df[product_cat_col].unique()[:10]
+                    mapping_df = pd.DataFrame({
+                        'Original': sample_cats,
+                        'Normalized': [normalize_category(c) for c in sample_cats]
+                    })
+                    st.dataframe(mapping_df, use_container_width=True)
+            
+            with col2:
+                st.write("**OSG File Unique Categories:**")
+                if osg_cat_col:
+                    unique_cats = osg_df[osg_cat_col].value_counts().head(20)
+                    st.dataframe(unique_cats, use_container_width=True)
+                    
+                    # Show what they normalize to
+                    st.write("**Category Mapping Preview:**")
+                    sample_cats = osg_df[osg_cat_col].unique()[:10]
+                    mapping_df = pd.DataFrame({
+                        'Original': sample_cats,
+                        'Normalized': [normalize_category(c) for c in sample_cats]
+                    })
+                    st.dataframe(mapping_df, use_container_width=True)
+        
         if st.button("🚀 Generate Report", type="primary"):
             
             with st.spinner("Processing data..."):
@@ -354,8 +418,13 @@ def main():
                 
                 st.success(f"✅ Data processed successfully! {len(processed_df)} records")
                 
+                # Show category distribution
+                st.subheader("📊 Category Distribution in Final Report")
+                category_counts = processed_df['Category'].value_counts()
+                st.dataframe(category_counts, use_container_width=True)
+                
                 # Preview
-                st.subheader("📊 Data Preview")
+                st.subheader("📋 Data Preview")
                 st.dataframe(processed_df.head(20), use_container_width=True)
                 
                 # Statistics
@@ -437,6 +506,11 @@ def main():
         5. Value Conversion (%)
         6. Need to Achieve Target (Value)
         7. Target %
+        
+        ### ✨ New Features:
+        - **Category Analysis Tool**: See how your categories are being mapped
+        - **Fixed Washing Machine Issue**: All categories now properly recognized
+        - **Debug Info**: View original vs normalized categories
         """)
 
 if __name__ == "__main__":
