@@ -472,7 +472,7 @@ def create_excel_report(df, future_keyword):
                  'Value Conversion (%)', 'Wtd. Target (%)', 'Need to Achieve (%)']
     apply_header(ws_summary, 3, s_headers)
 
-    fmt = {2: '₹#,##0.00', 3: '₹#,##0.00', 4: '0.00"%"', 5: '0.00"%"', 6: '0.00"%"'}
+    fmt = {2: '₹#,##0.00', 3: '#,##0', 4: '0.00"%"', 5: '0.00"%"', 6: '0.00"%"'}
     for r, row_data in enumerate(rbm_summary.values, start=4):
         write_row(ws_summary, r, row_data, fmt_map=fmt)
         need_cell = ws_summary.cell(row=r, column=6)
@@ -502,7 +502,7 @@ def create_excel_report(df, future_keyword):
                   'Need to Achieve (%)', 'Categories Met']
     apply_header(ws_store, 4, st_headers)
 
-    st_fmt = {5: '₹#,##0.00', 6: '₹#,##0.00', 7: '0.00"%"', 8: '0.00"%"', 9: '0.00"%"'}
+    st_fmt = {5: '₹#,##0.00', 6: '#,##0', 7: '0.00"%"', 8: '0.00"%"', 9: '0.00"%"'}
 
     for r_idx, (_, row) in enumerate(all_store_overview.iterrows(), start=5):
         is_future = is_future_store(row['Branch'])
@@ -549,7 +549,7 @@ def create_excel_report(df, future_keyword):
                   'Categories Met']
     apply_header(ws_future, 4, fs_headers)
 
-    fs_fmt = {4: '₹#,##0.00', 5: '₹#,##0.00', 6: '0.00"%"', 7: '0.00"%"', 8: '0.00"%"'}
+    fs_fmt = {4: '₹#,##0.00', 5: '#,##0', 6: '0.00"%"', 7: '0.00"%"', 8: '0.00"%"'}
 
     for r_idx, (_, row) in enumerate(future_store_overview.iterrows(), start=5):
         rank = row['Rank']
@@ -611,7 +611,7 @@ def create_excel_report(df, future_keyword):
                 row['Product_Sold_Price'], row['OSG_Sold_Price'],
                 row['Value_Conversion_%']]
         write_row(ws_tb, current_row, vals,
-                  fmt_map={4: '₹#,##0.00', 5: '₹#,##0.00', 6: '0.00"%"'})
+                  fmt_map={4: '₹#,##0.00', 5: '#,##0', 6: '0.00"%"'})
         for c in range(1, 7):
             ws_tb.cell(row=current_row, column=c).fill = top5_row_fill
             ws_tb.cell(row=current_row, column=c).font = top5_row_font
@@ -635,7 +635,7 @@ def create_excel_report(df, future_keyword):
                 row['Product_Sold_Price'], row['OSG_Sold_Price'],
                 row['Value_Conversion_%']]
         write_row(ws_tb, current_row, vals,
-                  fmt_map={4: '₹#,##0.00', 5: '₹#,##0.00', 6: '0.00"%"'})
+                  fmt_map={4: '₹#,##0.00', 5: '#,##0', 6: '0.00"%"'})
         for c in range(1, 7):
             ws_tb.cell(row=current_row, column=c).fill = bot5_row_fill
             ws_tb.cell(row=current_row, column=c).font = bot5_row_font
@@ -709,7 +709,7 @@ def create_excel_report(df, future_keyword):
         vals = [crow['Category'], crow['Product_Sold_Price'], crow['OSG_Sold_Price'],
                 crow['Value_Conversion_%'], crow['Target_%'], crow['Need_to_Achieve_%']]
         write_row(ws_tb, current_row, vals,
-                  fmt_map={2: '₹#,##0.00', 3: '₹#,##0.00',
+                  fmt_map={2: '₹#,##0.00', 3: '#,##0',
                            4: '0.00"%"', 5: '0.00"%"', 6: '0.00"%"'})
         need_cell = ws_tb.cell(row=current_row, column=6)
         if crow['Need_to_Achieve_%'] == 0:
@@ -732,7 +732,7 @@ def create_excel_report(df, future_keyword):
         vals = [crow['Category'], crow['Product_Sold_Price'], crow['OSG_Sold_Price'],
                 crow['Value_Conversion_%'], crow['Target_%'], crow['Need_to_Achieve_%']]
         write_row(ws_tb, current_row, vals,
-                  fmt_map={2: '₹#,##0.00', 3: '₹#,##0.00',
+                  fmt_map={2: '₹#,##0.00', 3: '#,##0',
                            4: '0.00"%"', 5: '0.00"%"', 6: '0.00"%"'})
         need_cell = ws_tb.cell(row=current_row, column=6)
         if crow['Need_to_Achieve_%'] == 0:
@@ -784,7 +784,7 @@ def create_excel_report(df, future_keyword):
                    'Value Conversion (%)', 'Target %', 'Need to Achieve Target (%)']
         apply_header(ws, 3, headers)
 
-        r_fmt = {3: '₹#,##0.00', 4: '₹#,##0.00', 5: '0.00"%"', 6: '0.00"%"', 7: '0.00"%"'}
+        r_fmt = {3: '₹#,##0.00', 4: '#,##0', 5: '0.00"%"', 6: '0.00"%"', 7: '0.00"%"'}
         for row_idx, row_data in enumerate(rbm_data.values, start=4):
             write_row(ws, row_idx, row_data, fmt_map=r_fmt)
             need_cell = ws.cell(row=row_idx, column=7)
@@ -810,7 +810,7 @@ def create_excel_report(df, future_keyword):
         ws.cell(row=sr, column=3).number_format = '₹#,##0.00'
         ws.cell(row=sr, column=3).font = Font(bold=True)
         ws.cell(row=sr, column=4, value=f'=SUM(D4:D{last_row})')
-        ws.cell(row=sr, column=4).number_format = '₹#,##0.00'
+        ws.cell(row=sr, column=4).number_format = '#,##0'
         ws.cell(row=sr, column=4).font = Font(bold=True)
         ws.cell(row=sr, column=5, value=f'=IF(C{sr}>0,(D{sr}/C{sr})*100,0)')
         ws.cell(row=sr, column=5).number_format = '0.00"%"'
