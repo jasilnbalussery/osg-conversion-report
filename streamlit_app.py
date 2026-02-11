@@ -48,7 +48,14 @@ def normalize_category(category):
         return 'AC'
     elif 'SMALL APPLIANCE' in cat_upper or 'SMALL APP' in cat_upper:
         return 'SMALL APPLIANCE'
+    elif 'SMALLAPPLIANCE' in cat_upper or 'SMALL-APPLIANCE' in cat_upper:
+        return 'SMALL APPLIANCE'
     elif 'SA' == cat_upper or cat_upper.startswith('SA ') or ' SA' in cat_upper or cat_upper.endswith(' SA'):
+        return 'SMALL APPLIANCE'
+    # Additional common small appliance variations
+    elif any(x in cat_upper for x in ['MIXER', 'GRINDER', 'BLENDER', 'TOASTER', 'KETTLE', 
+                                        'IRON', 'JUICER', 'COOKER', 'RICE COOKER',
+                                        'INDUCTION', 'TRIMMER', 'DRYER', 'HAIR DRYER']):
         return 'SMALL APPLIANCE'
     return None
 
@@ -763,7 +770,156 @@ def create_excel_report(df, future_keyword):
         ws_tb.column_dimensions[get_column_letter(i)].width = w
 
     # ============================================================
-    # SHEETS 5+: Individual RBM sheets
+    # SHEET 5: RBM-wise Category Conversion Analysis
+    # ============================================================
+    ws_rbm_cat = wb.create_sheet('RBM Category Analysis')
+    ws_rbm_cat['A1'] = 'RBM-WISE CATEGORY CONVERSION ANALYSIS'
+    ws_rbm_cat['A1'].font = Font(bold=True, size=16, color='1F4E78')
+    ws_rbm_cat.merge_cells('A1:H1')
+    ws_rbm_cat['A1'].alignment = Alignment(horizontal='center')
+
+    ws_rbm_cat['A2'] = 'Total conversion by RBM and Category — showing achievement vs targets'
+    ws_rbm_cat['A2'].font = Font(italic=True, size=10, color='666666')
+    ws_rbm_cat.merge_cells('A2:H2')
+
+    # Build RBM x Category summary
+    rbm_cat_summary = df.groupby(['RBM', 'Category']).agg({
+        'Product_Sold_Price': 'sum',
+        'OSG_Sold_Price': 'sum',
+        'Target_%': 'first'
+    }).reset_index()
+
+    rbm_cat_summary['Value_Conversion_%'] = np.where(
+        rbm_cat_summary['Product_Sold_Price'] > 0,
+        (rbm_cat_summary['OSG_Sold_Price'] / rbm_cat_summary['Product_Sold_Price'] * 100).round(2), 0
+    )
+
+    rbm_cat_summary['Need_to_Achieve_%'] = np.maximum(
+        (rbm_cat_summary['Target_%'] - rbm_cat_summary['Value_Conversion_%']).round(2), 0
+    )
+
+    rbm_cat_summary['Target_Achieved'] = rbm_cat_summary['Value_Conversion_%'] >= rbm_cat_summary['Target_%']
+
+    # Sort by RBM then Category
+    rbm_cat_summary = rbm_cat_summary.sort_values(['RBM', 'Category'])
+
+    # Write headers
+    rbm_cat_headers = ['RBM', 'Category', 'Product Sold Price', 'OSG Sold Price',
+                       'Value Conversion (%)', 'Target %', 'Need to Achieve (%)', 'Status']
+    apply_header(ws_rbm_cat, 4, rbm_cat_headers)
+
+    rbm_cat_fmt = {3: '₹#,##0.00', 4: '#,##0', 5: '0.00"%"', 6: '0.00"%"', 7: '0.00"%"'}
+
+    current_rbm = None
+    row_num = 5
+
+    for _, row_data in rbm_cat_summary.iterrows():
+        # Add separator row when RBM changes
+        if current_rbm != row_data['RBM']:
+            if current_rbm is not None:
+                # Add a blank row between RBMs
+                row_num += 1
+            current_rbm = row_data['RBM']
+
+        status = '✅' if row_data['Target_Achieved'] else '❌'
+        
+        vals = [
+            row_data['RBM'],
+            row_data['Category'],
+            row_data['Product_Sold_Price'],
+            row_data['OSG_Sold_Price'],
+            row_data['Value_Conversion_%'],
+            row_data['Target_%'],
+            row_data['Need_to_Achieve_%'],
+            status
+        ]
+        
+        write_row(ws_rbm_cat, row_num, vals, fmt_map=rbm_cat_fmt)
+
+        # Color code the "Need to Achieve" column
+        need_cell = ws_rbm_cat.cell(row=row_num, column=7)
+        status_cell = ws_rbm_cat.cell(row=row_num, column=8)
+        
+        if row_data['Target_Achieved']:
+            need_cell.fill = green_fill
+            need_cell.font = green_font
+            status_cell.fill = green_fill
+            status_cell.font = green_font
+        else:
+            need_cell.fill = red_fill
+            need_cell.font = red_font
+            status_cell.fill = red_fill
+            status_cell.font = red_font
+
+        row_num += 1
+
+    # Set column widths
+    rbm_cat_widths = [20, 22, 22, 20, 22, 14, 22, 10]
+    for i, w in enumerate(rbm_cat_widths, start=1):
+        ws_rbm_cat.column_dimensions[get_column_letter(i)].width = w
+
+    # Add summary section at the bottom
+    row_num += 2
+    add_section_header(ws_rbm_cat, row_num, '📊 SUMMARY BY CATEGORY (Across All RBMs)')
+    row_num += 1
+
+    cat_summary_headers = ['Category', 'Target %', 'Total Product Sales', 'Total OSG Sales',
+                          'Overall Conversion (%)', 'Overall Need to Achieve (%)', 'Status']
+    apply_header(ws_rbm_cat, row_num, cat_summary_headers, start_col=1)
+    row_num += 1
+
+    # Calculate category totals across all RBMs
+    cat_totals = df.groupby('Category').agg({
+        'Product_Sold_Price': 'sum',
+        'OSG_Sold_Price': 'sum',
+        'Target_%': 'first'
+    }).reset_index()
+
+    cat_totals['Overall_Conversion_%'] = np.where(
+        cat_totals['Product_Sold_Price'] > 0,
+        (cat_totals['OSG_Sold_Price'] / cat_totals['Product_Sold_Price'] * 100).round(2), 0
+    )
+
+    cat_totals['Overall_Need_%'] = np.maximum(
+        (cat_totals['Target_%'] - cat_totals['Overall_Conversion_%']).round(2), 0
+    )
+
+    cat_totals['Status'] = cat_totals['Overall_Conversion_%'] >= cat_totals['Target_%']
+
+    for _, crow in cat_totals.iterrows():
+        status = '✅ Achieved' if crow['Status'] else '❌ Below Target'
+        vals = [
+            crow['Category'],
+            crow['Target_%'],
+            crow['Product_Sold_Price'],
+            crow['OSG_Sold_Price'],
+            crow['Overall_Conversion_%'],
+            crow['Overall_Need_%'],
+            status
+        ]
+        
+        write_row(ws_rbm_cat, row_num, vals, 
+                 fmt_map={3: '₹#,##0.00', 4: '#,##0', 5: '0.00"%"', 6: '0.00"%"'})
+
+        # Color coding
+        need_cell = ws_rbm_cat.cell(row=row_num, column=6)
+        status_cell = ws_rbm_cat.cell(row=row_num, column=7)
+        
+        if crow['Status']:
+            need_cell.fill = green_fill
+            need_cell.font = green_font
+            status_cell.fill = green_fill
+            status_cell.font = green_font
+        else:
+            need_cell.fill = red_fill
+            need_cell.font = red_font
+            status_cell.fill = red_fill
+            status_cell.font = red_font
+
+        row_num += 1
+
+    # ============================================================
+    # SHEETS 6+: Individual RBM sheets
     # ============================================================
     rbms = sorted(df['RBM'].unique())
 
@@ -866,6 +1022,26 @@ def main():
                     st.write("**OSG Categories:**")
                     st.dataframe(osg_df[osg_cat_col].value_counts().head(20),
                                  use_container_width=True)
+        
+        # Show which categories will NOT be mapped
+        with st.expander("⚠️ Categories That Won't Be Included (Check Here!)"):
+            if product_cat_col:
+                unique_cats = product_df[product_cat_col].unique()
+                unmapped = [cat for cat in unique_cats if normalize_category(cat) is None]
+                if unmapped:
+                    st.warning(f"**{len(unmapped)} categories from Product file will be EXCLUDED:**")
+                    st.write(unmapped)
+                else:
+                    st.success("✅ All Product categories will be mapped!")
+            
+            if osg_cat_col:
+                unique_cats = osg_df[osg_cat_col].unique()
+                unmapped = [cat for cat in unique_cats if normalize_category(cat) is None]
+                if unmapped:
+                    st.warning(f"**{len(unmapped)} categories from OSG file will be EXCLUDED:**")
+                    st.write(unmapped)
+                else:
+                    st.success("✅ All OSG categories will be mapped!")
 
         if st.button("🚀 Generate Report", type="primary"):
             with st.spinner("Processing data..."):
@@ -1020,13 +1196,14 @@ def main():
                 | 2 | **Store Overview - All** | All stores ranked with Future stores highlighted 🔷 |
                 | 3 | **Future Store Ranking** | Only Future stores ranked — Top 5 🟢 Bottom 5 🔴 |
                 | 4 | **Top5 vs Bottom5 Future** | Category comparison + insights for Future stores only |
-                | 5–{4 + len(rbms)} | **{len(rbms)} RBM Sheets** | {', '.join(rbms)} |
+                | 5 | **RBM Category Analysis** | 🆕 Each RBM × Category total conversion & gap analysis |
+                | 6–{5 + len(rbms)} | **{len(rbms)} RBM Sheets** | {', '.join(rbms)} |
                 """)
 
     else:
         st.info("👆 Upload both Product and OSG files")
         st.markdown(f"""
-        ### 📊 Report Structure (5 types of sheets):
+        ### 📊 Report Structure (6 types of sheets):
 
         | Sheet | What it contains |
         |-------|------------------|
@@ -1034,6 +1211,7 @@ def main():
         | **Store Overview - All** | Every store ranked, Future stores highlighted 🔷 |
         | **Future Store Ranking** | Only Future stores, Top 5 🟢 / Bottom 5 🔴 |
         | **Top5 vs Bottom5 Future** | Category analysis + comparison + 12 auto-insights |
+        | **RBM Category Analysis** | 🆕 Each RBM × Category total with conversion gaps |
         | **RBM Sheets** | Branch × Category detail per RBM |
 
         ### 🏪 Future Store Detection:
@@ -1049,6 +1227,12 @@ def main():
         2. Category-by-category comparison table with verdicts
         3. Aggregated category detail for each group
         4. **12 auto-generated insights** covering gaps, alerts & recommendations
+        
+        ### 🆕 RBM Category Analysis includes:
+        1. Total conversion for each RBM × Category combination
+        2. How much conversion % each needs to achieve target
+        3. Category summary across all RBMs
+        4. Color-coded status (✅ Met / ❌ Below Target)
         """)
 
 
